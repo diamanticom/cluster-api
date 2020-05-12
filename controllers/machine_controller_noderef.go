@@ -46,6 +46,11 @@ func (r *MachineReconciler) reconcileNodeRef(ctx context.Context, cluster *clust
 	}
 
 	logger = logger.WithValues("cluster", cluster.Name)
+	if machine.Spec.InfrastructureRef.Kind == "DiamantiMachine" {
+		logger.Info("Ignoring providerID check for diamanti machine")
+		machine.Status.NodeRef = &machine.Spec.InfrastructureRef
+		return nil
+	}
 
 	// Check that the Machine has a valid ProviderID.
 	if machine.Spec.ProviderID == nil || *machine.Spec.ProviderID == "" {

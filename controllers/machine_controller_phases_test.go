@@ -131,7 +131,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeTrue())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 
 		Expect(r.Client.Get(ctx, types.NamespacedName{Name: bootstrapConfig.GetName(), Namespace: bootstrapConfig.GetNamespace()}, bootstrapConfig)).To(Succeed())
 
@@ -167,7 +167,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeTrue())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhasePending))
 
 		// LastUpdated should be set as the phase changes
@@ -208,7 +208,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeTrue())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseProvisioning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -277,7 +277,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(machine.Status.Addresses).To(HaveLen(2))
 		Expect(*machine.Spec.FailureDomain).To(Equal("us-east-2a"))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -330,7 +330,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(res.Requeue).To(BeFalse())
 		Expect(machine.Status.Addresses).To(HaveLen(0))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -394,7 +394,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -439,7 +439,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeTrue())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseProvisioned))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -506,7 +506,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(context.Background(), machine, nil, nil)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseDeleting))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -1008,7 +1008,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			}
 
 			err := r.reconcileInfrastructure(context.Background(), defaultCluster, tc.machine)
-			r.reconcilePhase(context.Background(), tc.machine)
+			r.reconcilePhase(context.Background(), tc.machine, nil, nil)
 			if tc.expectError {
 				g.Expect(err).ToNot(BeNil())
 			} else {

@@ -22,9 +22,11 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -34,19 +36,114 @@ import (
 	utilconversion "sigs.k8s.io/cluster-api/util/conversion"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
+	"sigs.k8s.io/cluster-api/controllers/remote"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
 	externalReadyWait = 30 * time.Second
 )
 
-func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machine) {
+const (
+	// CPU, in cores. (500m = .5 cores)
+	ResourceNetwork corev1.ResourceName = "network"
+)
+
+func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) {
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[annotation] = value
+	cluster.SetAnnotations(annotations)
+}
+
+func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme) (string, string, error) {
+	restConfig, err := remote.RESTConfig(context.TODO(), c, util.ObjectKey(cluster))
+	if err != nil {
+		return "", "", err
+	}
+
+	remoteClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return "", "", err
+	}
+
+	clusterAResourceMap := make(corev1.ResourceList)
+	clusterCResourceMap := make(corev1.ResourceList)
+	nodes, err := remoteClient.CoreV1().Nodes().List(metav1.ListOptions{})
+	for _, node := range nodes.Items {
+		AresourceList := node.Status.Allocatable
+		nodeACPUResource := AresourceList[corev1.ResourceCPU]
+		nodeAMemoryResource := AresourceList[corev1.ResourceMemory]
+		//klog.Infof("Node %s allocatable %v", node.Name, AresourceList)
+		clusterACPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
+		if !ok {
+			clusterACPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
+		}
+		clusterAMemoryResource, ok := clusterAResourceMap[corev1.ResourceMemory]
+		if !ok {
+			clusterAMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
+		}
+		clusterAStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
+		clusterANetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
+
+		(&clusterACPUResource).SetMilli((&clusterACPUResource).MilliValue() + (&nodeACPUResource).MilliValue())
+		(&clusterAMemoryResource).Set((&clusterAMemoryResource).Value() + (&nodeAMemoryResource).Value())
+
+		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
+		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
+		clusterAResourceMap[corev1.ResourceCPU] = clusterACPUResource
+		clusterAResourceMap[corev1.ResourceMemory] = clusterAMemoryResource
+		clusterAResourceMap[corev1.ResourceStorage] = clusterAStorageResource
+		clusterAResourceMap[ResourceNetwork] = clusterANetworkResource
+
+		CresourceList := node.Status.Capacity
+		clusterCCPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
+		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
+		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
+		if !ok {
+			clusterCCPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
+		}
+		clusterCMemoryResource, ok := clusterCResourceMap[corev1.ResourceMemory]
+		if !ok {
+			clusterCMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
+		}
+		clusterCStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
+		clusterCNetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
+
+		(&clusterCCPUResource).SetMilli((&clusterCCPUResource).MilliValue() + (&nodeCCPUResource).MilliValue())
+		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + (&nodeCMemoryResource).Value())
+
+		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
+		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
+		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
+		clusterCResourceMap[corev1.ResourceMemory] = clusterCMemoryResource
+		clusterCResourceMap[corev1.ResourceStorage] = clusterCStorageResource
+		clusterCResourceMap[ResourceNetwork] = clusterCNetworkResource
+	}
+
+	//klog.Infof("clusterResourceMap  %+v", clusterResourceMap)
+	alloc, err := json.Marshal(clusterAResourceMap)
+	if err != nil {
+		return "", "", err
+	}
+	capacity, err := json.Marshal(clusterCResourceMap)
+	if err != nil {
+		return "", "", err
+	}
+
+	return string(alloc), string(capacity), nil
+}
+
+func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machine, c client.Client, cluster *clusterv1.Cluster) {
 	originalPhase := m.Status.Phase
 
 	// Set the phase to "pending" if nil.
@@ -54,6 +151,7 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		m.Status.SetTypedPhase(clusterv1.MachinePhasePending)
 	}
 
+	oldPhase := m.Status.GetTypedPhase()
 	// Set the phase to "provisioning" if bootstrap is ready and the infrastructure isn't.
 	if m.Status.BootstrapReady && !m.Status.InfrastructureReady {
 		m.Status.SetTypedPhase(clusterv1.MachinePhaseProvisioning)
@@ -83,6 +181,13 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 	if m.Status.Phase != originalPhase {
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
+		newPhase := m.Status.GetTypedPhase()
+		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && oldPhase != clusterv1.MachinePhaseRunning && cluster != nil {
+			setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
+			if err := c.Update(context.TODO(), cluster); err != nil {
+				r.Log.Info("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name)
+			}
+		}
 	}
 }
 
@@ -274,6 +379,13 @@ func (r *MachineReconciler) reconcileInfrastructure(ctx context.Context, cluster
 		return errors.Wrapf(&capierrors.RequeueAfterError{RequeueAfter: externalReadyWait},
 			"Infrastructure provider for Machine %q in namespace %q is not ready, requeuing", m.Name, m.Namespace,
 		)
+	}
+	if m.Spec.InfrastructureRef.Kind == "DiamantiMachine" {
+		var x string = "diamanti"
+		m.Spec.ProviderID = pointer.StringPtr(x)
+		m.Status.InfrastructureReady = true
+		r.Log.Info("Ignoring providerID/addresses check for diamanti machine")
+		return nil
 	}
 
 	// Get Spec.ProviderID from the infrastructure provider.

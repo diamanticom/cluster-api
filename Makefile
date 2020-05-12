@@ -72,7 +72,8 @@ PROD_REGISTRY ?= us.gcr.io/k8s-artifacts-prod/cluster-api
 
 # core
 IMAGE_NAME ?= cluster-api-controller
-CONTROLLER_IMG ?= $(REGISTRY)/$(IMAGE_NAME)
+CONTROLLER_IMG ?= diamanti/capi
+TAG ?= v0.3.7.1
 
 # bootstrap
 KUBEADM_BOOTSTRAP_IMAGE_NAME ?= kubeadm-bootstrap-controller
@@ -329,8 +330,8 @@ docker-build: ## Build the docker images for controller managers
 
 .PHONY: docker-build-core
 docker-build-core: ## Build the docker image for core controller manager
-	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) . -t $(CONTROLLER_IMG)-$(ARCH):$(TAG)
-	$(MAKE) set-manifest-image MANIFEST_IMG=$(CONTROLLER_IMG)-$(ARCH) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./config/manager/manager_image_patch.yaml"
+	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) . -t $(CONTROLLER_IMG):$(TAG)
+	$(MAKE) set-manifest-image MANIFEST_IMG=$(CONTROLLER_IMG) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./config/manager/manager_image_patch.yaml"
 	$(MAKE) set-manifest-pull-policy TARGET_RESOURCE="./config/manager/manager_pull_policy.yaml"
 
 .PHONY: docker-build-kubeadm-bootstrap
@@ -347,9 +348,9 @@ docker-build-kubeadm-control-plane: ## Build the docker image for kubeadm contro
 
 .PHONY: docker-push
 docker-push: ## Push the docker images
-	docker push $(CONTROLLER_IMG)-$(ARCH):$(TAG)
-	docker push $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
-	docker push $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
+	docker push $(CONTROLLER_IMG):$(TAG)
+#	docker push $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
+#	docker push $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
 
 ## --------------------------------------
 ## Docker — All ARCH
@@ -368,14 +369,11 @@ docker-push-all: $(addprefix docker-push-,$(ALL_ARCH))
 	$(MAKE) docker-push-kubeadm-control-plane-manifest
 
 docker-push-%:
-	$(MAKE) ARCH=$* docker-push
+	$(MAKE) docker-push
 
 .PHONY: docker-push-core-manifest
 docker-push-core-manifest: ## Push the fat manifest docker image for the core image.
 	## Minimum docker version 18.06.0 is required for creating and pushing manifest images.
-	docker manifest create --amend $(CONTROLLER_IMG):$(TAG) $(shell echo $(ALL_ARCH) | sed -e "s~[^ ]*~$(CONTROLLER_IMG)\-&:$(TAG)~g")
-	@for arch in $(ALL_ARCH); do docker manifest annotate --arch $${arch} ${CONTROLLER_IMG}:${TAG} ${CONTROLLER_IMG}-$${arch}:${TAG}; done
-	docker manifest push --purge $(CONTROLLER_IMG):$(TAG)
 	$(MAKE) set-manifest-image MANIFEST_IMG=$(CONTROLLER_IMG) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./config/manager/manager_image_patch.yaml"
 	$(MAKE) set-manifest-pull-policy TARGET_RESOURCE="./config/manager/manager_pull_policy.yaml"
 

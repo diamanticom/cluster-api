@@ -54,7 +54,10 @@ import (
 const (
 	// deleteRequeueAfter is how long to wait before checking again to see if the cluster still has children during
 	// deletion.
-	deleteRequeueAfter = 5 * time.Second
+	deleteRequeueAfter    = 5 * time.Second
+	K8SProvisioned        = "true"
+	allocResAnnotation    = "spektra.diamanti.io/allocatable-resources"
+	capacityResAnnotation = "spektra.diamanti.io/capacity-resources"
 )
 
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
@@ -481,6 +484,10 @@ func splitMachineList(list *clusterv1.MachineList) (*clusterv1.MachineList, *clu
 
 func (r *ClusterReconciler) reconcileControlPlaneInitialized(ctx context.Context, cluster *clusterv1.Cluster) error {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	if isClusterExternallyProvisioned(cluster) {
+		cluster.Status.InfrastructureReady = true
+		return nil
+	}
 
 	// Skip checking if the control plane is initialized when using a Control Plane Provider
 	if cluster.Spec.ControlPlaneRef != nil {
@@ -535,4 +542,13 @@ func (r *ClusterReconciler) controlPlaneMachineToCluster(o handler.MapObject) []
 	return []ctrl.Request{{
 		NamespacedName: util.ObjectKey(cluster),
 	}}
+}
+
+// Check if the cluster is externally provisioned and we need to adopt it
+func isClusterExternallyProvisioned(cluster *clusterv1.Cluster) bool {
+	annotations := cluster.ObjectMeta.GetAnnotations()
+	if annotations != nil && annotations["spektra.diamanti.io/externally-provisioned"] == K8SProvisioned {
+		return true
+	}
+	return false
 }

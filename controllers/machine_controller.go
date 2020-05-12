@@ -181,7 +181,7 @@ func (r *MachineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 			),
 		)
 
-		r.reconcilePhase(ctx, m)
+		r.reconcilePhase(ctx, m, r.Client, cluster)
 		r.reconcileMetrics(ctx, m)
 
 		// Always attempt to patch the object and status after each reconciliation.

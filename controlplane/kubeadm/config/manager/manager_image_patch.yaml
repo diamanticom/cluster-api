@@ -7,5 +7,5 @@ spec:
   template:
     spec:
       containers:
-        - image: gcr.io/k8s-staging-cluster-api/kubeadm-control-plane-controller:master
+        - image: gcr.io/advance-subject-260702/kubeadm-control-plane-controller-amd64:v0.3.3.1
           name: manager

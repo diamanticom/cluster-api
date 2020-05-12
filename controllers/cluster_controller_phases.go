@@ -48,7 +48,7 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioning)
 	}
 
-	if cluster.Status.InfrastructureReady && !cluster.Spec.ControlPlaneEndpoint.IsZero() {
+	if cluster.Status.InfrastructureReady && (isClusterExternallyProvisioned(cluster) || !cluster.Spec.ControlPlaneEndpoint.IsZero()) {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioned)
 	}
 
@@ -136,6 +136,18 @@ func (r *ClusterReconciler) reconcileExternal(ctx context.Context, cluster *clus
 // reconcileInfrastructure reconciles the Spec.InfrastructureRef object on a Cluster.
 func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster *clusterv1.Cluster) error {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	if isClusterExternallyProvisioned(cluster) {
+		cluster.Status.InfrastructureReady = true
+		setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
+		alloc, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+		if err != nil {
+			logger.V(3).Info("Failed to get cluster resources with error: %v", err)
+			return err
+		}
+		setAnnotation(cluster, allocResAnnotation, alloc)
+		setAnnotation(cluster, capacityResAnnotation, capacity)
+		return nil
+	}
 
 	if cluster.Spec.InfrastructureRef == nil {
 		return nil
@@ -194,6 +206,11 @@ func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster
 
 // reconcileControlPlane reconciles the Spec.ControlPlaneRef object on a Cluster.
 func (r *ClusterReconciler) reconcileControlPlane(ctx context.Context, cluster *clusterv1.Cluster) error {
+	if isClusterExternallyProvisioned(cluster) {
+		cluster.Status.InfrastructureReady = true
+		return nil
+	}
+
 	if cluster.Spec.ControlPlaneRef == nil {
 		return nil
 	}
@@ -241,7 +258,7 @@ func (r *ClusterReconciler) reconcileControlPlane(ctx context.Context, cluster *
 }
 
 func (r *ClusterReconciler) reconcileKubeconfig(ctx context.Context, cluster *clusterv1.Cluster) error {
-	if cluster.Spec.ControlPlaneEndpoint.IsZero() {
+	if cluster.Spec.ControlPlaneEndpoint.IsZero() && !isClusterExternallyProvisioned(cluster) {
 		return nil
 	}
 
