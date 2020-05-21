@@ -18,6 +18,7 @@ package cluster
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/scheme"
 	"sigs.k8s.io/cluster-api/cmd/version"
@@ -161,18 +163,27 @@ func newProxy(kubeconfig string) Proxy {
 }
 
 func (k *proxy) getConfig() (*rest.Config, error) {
-	config, err := clientcmd.LoadFromFile(k.kubeconfig)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load Kubeconfig file from %q", k.kubeconfig)
+	var restConfig *restclient.Config
+	_, err := os.Stat(k.kubeconfig)
+	if os.IsExist(err) {
+		config, err := clientcmd.LoadFromFile(k.kubeconfig)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to load Kubeconfig file from %q", k.kubeconfig)
+		}
+		restConfig, err = clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{}).ClientConfig()
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "invalid configuration:") {
+				return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
+			}
+			return nil, err
+		}
+	} else {
+		restConfig, err = rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("Failed inclusterConfig for kubeconfig with error: %v", err)
+		}
 	}
 
-	restConfig, err := clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{}).ClientConfig()
-	if err != nil {
-		if strings.HasPrefix(err.Error(), "invalid configuration:") {
-			return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
-		}
-		return nil, err
-	}
 	restConfig.UserAgent = fmt.Sprintf("clusterctl/%s (%s)", version.Get().GitVersion, version.Get().Platform)
 
 	// Set QPS and Burst to a threshold that ensures the controller runtime client/client go does't generate throttling log messages
