@@ -18,7 +18,6 @@ package cluster
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -162,22 +161,27 @@ func newProxy(kubeconfig string) Proxy {
 	}
 }
 
+func getRestConfig(kubeconfigFile string) (*rest.Config, error) {
+	config, err := clientcmd.LoadFromFile(kubeconfigFile)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to load Kubeconfig file from %q", kubeconfigFile)
+	}
+	restConfig, err := clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "invalid configuration:") {
+			return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
+		}
+		return nil, err
+	}
+	return restConfig, nil
+}
+
 func (k *proxy) getConfig() (*rest.Config, error) {
 	var restConfig *restclient.Config
-	_, err := os.Stat(k.kubeconfig)
-	if os.IsExist(err) {
-		config, err := clientcmd.LoadFromFile(k.kubeconfig)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to load Kubeconfig file from %q", k.kubeconfig)
-		}
-		restConfig, err = clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{}).ClientConfig()
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "invalid configuration:") {
-				return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
-			}
-			return nil, err
-		}
-	} else {
+
+	// Check if kubeconfig is present and get restConfig. If not present, check if incluster restConfig can be got.
+	restConfig, err := getRestConfig(k.kubeconfig)
+	if err != nil {
 		restConfig, err = rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("Failed inclusterConfig for kubeconfig with error: %v", err)
