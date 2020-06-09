@@ -73,7 +73,7 @@ PROD_REGISTRY ?= us.gcr.io/k8s-artifacts-prod/cluster-api
 # core
 IMAGE_NAME ?= cluster-api-controller
 CONTROLLER_IMG ?= diamanti/capi
-TAG ?= v0.3.3.1
+TAG ?= v0.3.3.2
 
 # bootstrap
 KUBEADM_BOOTSTRAP_IMAGE_NAME ?= kubeadm-bootstrap-controller
@@ -351,9 +351,9 @@ docker-build-kubeadm-control-plane: ## Build the docker image for kubeadm contro
 
 .PHONY: docker-push
 docker-push: ## Push the docker images
-	docker push $(CONTROLLER_IMG)-$(ARCH):$(TAG)
-	docker push $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
-	docker push $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
+	docker push $(CONTROLLER_IMG):$(TAG)
+#	docker push $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
+#	docker push $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
 
 ## --------------------------------------
 ## Docker — All ARCH
