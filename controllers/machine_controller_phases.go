@@ -89,8 +89,8 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		if !ok {
 			clusterAMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
-		clusterAStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		clusterANetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
+		//clusterAStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
+		//clusterANetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
 
 		(&clusterACPUResource).SetMilli((&clusterACPUResource).MilliValue() + (&nodeACPUResource).MilliValue())
 		(&clusterAMemoryResource).Set((&clusterAMemoryResource).Value() + (&nodeAMemoryResource).Value())
@@ -99,8 +99,8 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterAResourceMap[corev1.ResourceCPU] = clusterACPUResource
 		clusterAResourceMap[corev1.ResourceMemory] = clusterAMemoryResource
-		clusterAResourceMap[corev1.ResourceStorage] = clusterAStorageResource
-		clusterAResourceMap[ResourceNetwork] = clusterANetworkResource
+		//clusterAResourceMap[corev1.ResourceStorage] = clusterAStorageResource
+		//clusterAResourceMap[ResourceNetwork] = clusterANetworkResource
 
 		CresourceList := node.Status.Capacity
 		clusterCCPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
@@ -113,8 +113,8 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		if !ok {
 			clusterCMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
-		clusterCStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		clusterCNetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
+		//clusterCStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
+		//clusterCNetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
 
 		(&clusterCCPUResource).SetMilli((&clusterCCPUResource).MilliValue() + (&nodeCCPUResource).MilliValue())
 		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + (&nodeCMemoryResource).Value())
@@ -123,8 +123,8 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
 		clusterCResourceMap[corev1.ResourceMemory] = clusterCMemoryResource
-		clusterCResourceMap[corev1.ResourceStorage] = clusterCStorageResource
-		clusterCResourceMap[ResourceNetwork] = clusterCNetworkResource
+		//clusterCResourceMap[corev1.ResourceStorage] = clusterCStorageResource
+		//clusterCResourceMap[ResourceNetwork] = clusterCNetworkResource
 	}
 
 	//klog.Infof("clusterResourceMap  %+v", clusterResourceMap)
@@ -182,7 +182,18 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && oldPhase != clusterv1.MachinePhaseRunning && cluster != nil {
 			setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
 			if err := c.Update(context.TODO(), cluster); err != nil {
-				r.Log.Info("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name)
+				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
+			}
+		}
+		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
+			_, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+			if err != nil {
+				r.Log.Info(fmt.Sprintf("Failed to get cluster resources with error: %v", err))
+			}
+			//setAnnotation(cluster, allocResAnnotation, alloc)
+			setAnnotation(cluster, capacityResAnnotation, capacity)
+			if err := c.Update(context.TODO(), cluster); err != nil {
+				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
 			}
 		}
 	}

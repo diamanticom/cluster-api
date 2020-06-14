@@ -138,12 +138,12 @@ func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster
 	if isClusterExternallyProvisioned(cluster) {
 		cluster.Status.InfrastructureReady = true
 		setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
-		alloc, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+		_, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
 		if err != nil {
 			logger.V(3).Info("Failed to get cluster resources with error: %v", err)
 			return err
 		}
-		setAnnotation(cluster, allocResAnnotation, alloc)
+		//setAnnotation(cluster, allocResAnnotation, alloc)
 		setAnnotation(cluster, capacityResAnnotation, capacity)
 		return nil
 	}
