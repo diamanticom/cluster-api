@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"log"
 	"encoding/json"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -49,8 +50,7 @@ var (
 )
 
 const (
-	// CPU, in cores. (500m = .5 cores)
-	ResourceNetwork corev1.ResourceName = "network"
+	ResourceGPU corev1.ResourceName = "nvidia.com/gpu"
 )
 
 func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) {
@@ -62,82 +62,60 @@ func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) 
 	cluster.SetAnnotations(annotations)
 }
 
-func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme) (string, string, error) {
+func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme) (string, error) {
 	restConfig, err := remote.RESTConfig(context.TODO(), c, util.ObjectKey(cluster))
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	remoteClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
-	clusterAResourceMap := make(corev1.ResourceList)
 	clusterCResourceMap := make(corev1.ResourceList)
 	nodes, err := remoteClient.CoreV1().Nodes().List(metav1.ListOptions{})
 	for _, node := range nodes.Items {
-		AresourceList := node.Status.Allocatable
-		nodeACPUResource := AresourceList[corev1.ResourceCPU]
-		nodeAMemoryResource := AresourceList[corev1.ResourceMemory]
 		//klog.Infof("Node %s allocatable %v", node.Name, AresourceList)
-		clusterACPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
-		if !ok {
-			clusterACPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
-		}
-		clusterAMemoryResource, ok := clusterAResourceMap[corev1.ResourceMemory]
-		if !ok {
-			clusterAMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
-		}
-		//clusterAStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		//clusterANetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
-
-		(&clusterACPUResource).SetMilli((&clusterACPUResource).MilliValue() + (&nodeACPUResource).MilliValue())
-		(&clusterAMemoryResource).Set((&clusterAMemoryResource).Value() + (&nodeAMemoryResource).Value())
-
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
-		clusterAResourceMap[corev1.ResourceCPU] = clusterACPUResource
-		clusterAResourceMap[corev1.ResourceMemory] = clusterAMemoryResource
-		//clusterAResourceMap[corev1.ResourceStorage] = clusterAStorageResource
-		//clusterAResourceMap[ResourceNetwork] = clusterANetworkResource
+
 
 		CresourceList := node.Status.Capacity
-		clusterCCPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
 		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
 		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
+		nodeCGPUResource := CresourceList[ResourceGPU]
+		clusterCCPUResource, ok := clusterCResourceMap[corev1.ResourceCPU]
 		if !ok {
-			clusterCCPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
+			clusterCCPUResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
 		clusterCMemoryResource, ok := clusterCResourceMap[corev1.ResourceMemory]
 		if !ok {
-			clusterCMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
+			clusterCMemoryResource = *resource.NewQuantity(0, resource.BinarySI)
 		}
-		//clusterCStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		//clusterCNetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
+		clusterCGPUResource, ok := clusterCResourceMap[ResourceGPU]
+		if !ok {
+			clusterCGPUResource = *resource.NewQuantity(0, resource.DecimalSI)
+		}
+		(&clusterCCPUResource).Set((&clusterCCPUResource).Value() + (&nodeCCPUResource).Value())
+		(&clusterCGPUResource).Set((&clusterCGPUResource).Value() + (&nodeCGPUResource).Value())
+		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + ((&nodeCMemoryResource).Value()) / (1024 * 1024 * 1024))
 
-		(&clusterCCPUResource).SetMilli((&clusterCCPUResource).MilliValue() + (&nodeCCPUResource).MilliValue())
-		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + (&nodeCMemoryResource).Value())
-
+		log.Printf("Node %s is %+v, %+v", node.Name, nodeCMemoryResource, clusterCMemoryResource)
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
 		clusterCResourceMap[corev1.ResourceMemory] = clusterCMemoryResource
-		//clusterCResourceMap[corev1.ResourceStorage] = clusterCStorageResource
-		//clusterCResourceMap[ResourceNetwork] = clusterCNetworkResource
+		clusterCResourceMap[ResourceGPU] = clusterCGPUResource
 	}
 
 	//klog.Infof("clusterResourceMap  %+v", clusterResourceMap)
-	alloc, err := json.Marshal(clusterAResourceMap)
-	if err != nil {
-		return "", "", err
-	}
 	capacity, err := json.Marshal(clusterCResourceMap)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
-	return string(alloc), string(capacity), nil
+	return string(capacity), nil
 }
 
 func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machine, c client.Client, cluster *clusterv1.Cluster) {
@@ -186,11 +164,10 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 			}
 		}
 		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
-			_, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+			capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
 			if err != nil {
 				r.Log.Info(fmt.Sprintf("Failed to get cluster resources with error: %v", err))
 			}
-			//setAnnotation(cluster, allocResAnnotation, alloc)
 			setAnnotation(cluster, capacityResAnnotation, capacity)
 			if err := c.Update(context.TODO(), cluster); err != nil {
 				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
@@ -360,7 +337,6 @@ func (r *MachineReconciler) reconcileInfrastructure(ctx context.Context, cluster
 		var x string = "diamanti"
 		m.Spec.ProviderID = pointer.StringPtr(x)
 		m.Status.InfrastructureReady = true
-		r.Log.Info("Ignoring providerID/addresses check for diamanti machine")
 		return nil
 	}
 
