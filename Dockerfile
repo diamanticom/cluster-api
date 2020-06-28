@@ -33,7 +33,7 @@ RUN go mod download
 COPY ./ ./
 
 # Cache the go build
-RUN go build .
+RUN go build -gcflags='-N -l' .
 
 # Build
 ARG package=.
@@ -42,7 +42,7 @@ ARG ARCH
 # Do not force rebuild of up-to-date packages (do not use -a)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} \
     go build -ldflags '-extldflags "-static"' \
-    -o manager ${package}
+    -o manager -gcflags='-N -l' ${package}
 
 # Production image
 FROM gcr.io/distroless/static:latest

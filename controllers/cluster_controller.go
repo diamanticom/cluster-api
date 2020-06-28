@@ -23,13 +23,18 @@ import (
 	"strings"
 	"time"
 
+	"encoding/base64"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/metrics"
@@ -173,6 +178,41 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 		}
 
 		errs = append(errs, err)
+	}
+	tenantDataSecret := &corev1.Secret{}
+	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: "tenant-data-secret", Namespace: cluster.Namespace}, tenantDataSecret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Object not found, return.  Created objects are automatically garbage collected.
+			// For additional cleanup logic use finalizers.
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	dummyTrue := true
+	tenantName, tok := tenantDataSecret.Data["TenantName"]
+	tenantUID, uok := tenantDataSecret.Data["UID"]
+	if uok && tok {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			tenantName, _ = base64.StdEncoding.DecodeString(string(tenantName))
+			tenantUID, _ = base64.StdEncoding.DecodeString(string(tenantUID))
+			expectedOwnerRef := metav1.OwnerReference{
+				APIVersion:         "tenancy.x-k8s.io/v1alpha1",
+				Kind:               "Tenant",
+				Name:               string(tenantName),
+				UID:                types.UID(string(tenantUID)),
+				Controller:         &dummyTrue,
+				BlockOwnerDeletion: &dummyTrue,
+			}
+			cluster.ObjectMeta.OwnerReferences = []metav1.OwnerReference{expectedOwnerRef}
+			err := r.Client.Update(context.TODO(), cluster)
+
+			return err
+		})
+		if err != nil {
+			logger.Info(fmt.Sprintf("Updating Cluster Ownerref:%s", err.Error()))
+			return ctrl.Result{}, err
+		}
 	}
 	return res, kerrors.NewAggregate(errs)
 }
