@@ -49,10 +49,12 @@ import (
 const (
 	// deleteRequeueAfter is how long to wait before checking again to see if the cluster still has children during
 	// deletion.
-	deleteRequeueAfter    = 5 * time.Second
-	K8SProvisioned        = "true"
-	allocResAnnotation    = "spektra.diamanti.io/allocatable-resources"
-	capacityResAnnotation = "spektra.diamanti.io/capacity-resources"
+	deleteRequeueAfter        = 5 * time.Second
+	K8SProvisioned            = "true"
+	KLabelExternalProvisioned = "spektra.diamanti.io/externally-provisioned"
+	KLabelClusterRunning      = "spektra.diamanti.io/cluster-running"
+	allocResAnnotation        = "spektra.diamanti.io/allocatable-resources"
+	capacityResAnnotation     = "spektra.diamanti.io/capacity-resources"
 )
 
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
@@ -506,7 +508,16 @@ func (r *ClusterReconciler) controlPlaneMachineToCluster(o handler.MapObject) []
 // Check if the cluster is externally provisioned and we need to adopt it
 func isClusterExternallyProvisioned(cluster *clusterv1.Cluster) bool {
 	annotations := cluster.ObjectMeta.GetAnnotations()
-	if annotations != nil && annotations["spektra.diamanti.io/externally-provisioned"] == K8SProvisioned {
+	if annotations != nil && annotations[KLabelExternalProvisioned] == K8SProvisioned {
+		return true
+	}
+	return false
+}
+
+// Check if the cluster has atleast one control plane in running state
+func isClusterRunning(cluster *clusterv1.Cluster) bool {
+	annotations := cluster.ObjectMeta.GetAnnotations()
+	if annotations != nil && annotations[KLabelClusterRunning] == K8SProvisioned {
 		return true
 	}
 	return false

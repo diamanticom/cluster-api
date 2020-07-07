@@ -51,6 +51,10 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioned)
 	}
 
+	if isClusterRunning(cluster) {
+		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
+	}
+
 	if cluster.Status.FailureReason != nil || cluster.Status.FailureMessage != nil {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseFailed)
 	}
@@ -137,7 +141,7 @@ func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 	if isClusterExternallyProvisioned(cluster) {
 		cluster.Status.InfrastructureReady = true
-		setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
+		setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
 		capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
 		if err != nil {
 			logger.V(3).Info("Failed to get cluster resources with error: %v", err)

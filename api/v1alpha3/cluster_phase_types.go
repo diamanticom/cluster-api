@@ -41,6 +41,10 @@ const (
 	// infrastructure has been created and configured.
 	ClusterPhaseProvisioned = ClusterPhase("Provisioned")
 
+	// ClusterPhaseRunning is the state when atleast one control plane
+	// machine is in running state
+	ClusterPhaseRunning = ClusterPhase("running")
+
 	// ClusterPhaseDeleting is the Cluster state when a delete
 	// request has been sent to the API Server,
 	// but its infrastructure has not yet been fully deleted.

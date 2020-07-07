@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"log"
 	"encoding/json"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
+	//"log"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/remote"
@@ -80,7 +80,6 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 
-
 		CresourceList := node.Status.Capacity
 		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
 		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
@@ -99,9 +98,9 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		}
 		(&clusterCCPUResource).Set((&clusterCCPUResource).Value() + (&nodeCCPUResource).Value())
 		(&clusterCGPUResource).Set((&clusterCGPUResource).Value() + (&nodeCGPUResource).Value())
-		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + ((&nodeCMemoryResource).Value()) / (1024 * 1024 * 1024))
+		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + ((&nodeCMemoryResource).Value())/(1024*1024*1024))
 
-		log.Printf("Node %s is %+v, %+v", node.Name, nodeCMemoryResource, clusterCMemoryResource)
+		//log.Printf("Node %s is %+v, %+v", node.Name, nodeCMemoryResource, clusterCMemoryResource)
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
@@ -158,7 +157,7 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		m.Status.LastUpdated = &now
 		newPhase := m.Status.GetTypedPhase()
 		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && oldPhase != clusterv1.MachinePhaseRunning && cluster != nil {
-			setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
+			setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
 			if err := c.Update(context.TODO(), cluster); err != nil {
 				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
 			}
