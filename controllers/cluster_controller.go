@@ -153,41 +153,43 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 
 	// If object doesn't have a finalizer, add one.
 	controllerutil.AddFinalizer(cluster, clusterv1.ClusterFinalizer)
-	logger.Info("Finding tenant-data-secret")
-	tenantDataSecret := &corev1.Secret{}
+	go func() {
+		logger.Info("Finding tenant-data-secret")
+		tenantDataSecret := &corev1.Secret{}
 
-	err := retry.OnError(retry.DefaultRetry, apierrors.IsNotFound, func() error {
-		err := r.Client.Get(context.TODO(), types.NamespacedName{Name: "tenant-data-secret", Namespace: cluster.Namespace}, tenantDataSecret)
-		return err
-	})
-	if err != nil {
-		logger.Info(fmt.Sprintf("Finding tenant-data-secert error :%s", err.Error()))
-		return ctrl.Result{}, err
-	}
-
-	dummyTrue := true
-	tenantName, tok := tenantDataSecret.Data["TenantName"]
-	tenantUID, uok := tenantDataSecret.Data["UID"]
-	if uok && tok {
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			expectedOwnerRef := metav1.OwnerReference{
-				APIVersion:         "tenancy.x-k8s.io/v1alpha1",
-				Kind:               "Tenant",
-				Name:               string(tenantName),
-				UID:                types.UID(string(tenantUID)),
-				BlockOwnerDeletion: &dummyTrue,
-				Controller:         &dummyTrue,
-			}
-			cluster.ObjectMeta.OwnerReferences = append(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
-			err := r.Client.Update(context.TODO(), cluster)
-
+		err := retry.OnError(retry.DefaultRetry, apierrors.IsNotFound, func() error {
+			err := r.Client.Get(context.TODO(), types.NamespacedName{Name: "tenant-data-secret", Namespace: cluster.Namespace}, tenantDataSecret)
 			return err
 		})
 		if err != nil {
-			logger.Info(fmt.Sprintf("Ignore owner reference secret change error :%s", err.Error()))
-			return ctrl.Result{}, nil
+			logger.Info(fmt.Sprintf("Finding tenant-data-secert error :%s", err.Error()))
+			return
 		}
-	}
+
+		dummyTrue := true
+		tenantName, tok := tenantDataSecret.Data["TenantName"]
+		tenantUID, uok := tenantDataSecret.Data["UID"]
+		if uok && tok {
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				expectedOwnerRef := metav1.OwnerReference{
+					APIVersion:         "tenancy.x-k8s.io/v1alpha1",
+					Kind:               "Tenant",
+					Name:               string(tenantName),
+					UID:                types.UID(string(tenantUID)),
+					BlockOwnerDeletion: &dummyTrue,
+					Controller:         &dummyTrue,
+				}
+				cluster.ObjectMeta.OwnerReferences = append(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
+				err := r.Client.Update(context.TODO(), cluster)
+
+				return err
+			})
+			if err != nil {
+				logger.Info(fmt.Sprintf("Ignore owner reference secret change error :%s", err.Error()))
+				return
+			}
+		}
+	}()
 	// Call the inner reconciliation methods.
 	reconciliationErrors := []error{
 		r.reconcileInfrastructure(ctx, cluster),
