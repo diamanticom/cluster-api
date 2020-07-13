@@ -170,24 +170,16 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 		tenantName, tok := tenantDataSecret.Data["TenantName"]
 		tenantUID, uok := tenantDataSecret.Data["UID"]
 		if uok && tok {
-			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				expectedOwnerRef := metav1.OwnerReference{
-					APIVersion:         "tenancy.x-k8s.io/v1alpha1",
-					Kind:               "Tenant",
-					Name:               string(tenantName),
-					UID:                types.UID(string(tenantUID)),
-					BlockOwnerDeletion: &dummyTrue,
-					Controller:         &dummyTrue,
-				}
-				cluster.ObjectMeta.OwnerReferences = append(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
-				err := r.Client.Update(context.TODO(), cluster)
-
-				return err
-			})
-			if err != nil {
-				logger.Info(fmt.Sprintf("Ignore owner reference secret change error :%s", err.Error()))
-				return
+			expectedOwnerRef := metav1.OwnerReference{
+				APIVersion:         "tenancy.x-k8s.io/v1alpha1",
+				Kind:               "Tenant",
+				Name:               string(tenantName),
+				UID:                types.UID(string(tenantUID)),
+				BlockOwnerDeletion: &dummyTrue,
+				Controller:         &dummyTrue,
 			}
+			cluster.ObjectMeta.OwnerReferences = util.EnsureOwnerRef(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
+
 		}
 	}()
 	// Call the inner reconciliation methods.
