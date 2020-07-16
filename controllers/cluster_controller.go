@@ -25,9 +25,12 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
@@ -151,7 +154,31 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 
 	// If object doesn't have a finalizer, add one.
 	controllerutil.AddFinalizer(cluster, clusterv1.ClusterFinalizer)
+	logger.Info("Finding tenant-data-secret")
+	tenantDataSecret := &corev1.Secret{}
 
+	err := r.Client.Get(context.TODO(),
+		types.NamespacedName{Name: "tenant-data-secret", Namespace: cluster.Namespace}, tenantDataSecret)
+	if err != nil {
+		logger.Info(fmt.Sprintf("Finding tenant-data-secert error :%s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	dummyTrue := true
+	tenantName, tok := tenantDataSecret.Data["TenantName"]
+	tenantUID, uok := tenantDataSecret.Data["UID"]
+	if uok && tok {
+		expectedOwnerRef := metav1.OwnerReference{
+			APIVersion:         "tenancy.x-k8s.io/v1alpha1",
+			Kind:               "Tenant",
+			Name:               string(tenantName),
+			UID:                types.UID(string(tenantUID)),
+			BlockOwnerDeletion: &dummyTrue,
+			Controller:         &dummyTrue,
+		}
+		cluster.ObjectMeta.OwnerReferences = util.EnsureOwnerRef(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
+
+	}
 	// Call the inner reconciliation methods.
 	reconciliationErrors := []error{
 		r.reconcileInfrastructure(ctx, cluster),
@@ -176,6 +203,7 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 
 		errs = append(errs, err)
 	}
+
 	return res, kerrors.NewAggregate(errs)
 }
 
