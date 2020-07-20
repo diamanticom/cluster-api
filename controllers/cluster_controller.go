@@ -154,7 +154,6 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 
 	// If object doesn't have a finalizer, add one.
 	controllerutil.AddFinalizer(cluster, clusterv1.ClusterFinalizer)
-	logger.Info("Finding tenant-data-secret")
 	tenantDataSecret := &corev1.Secret{}
 
 	err := r.Client.Get(context.TODO(),
@@ -239,6 +238,7 @@ func (r *ClusterReconciler) reconcileMetrics(_ context.Context, cluster *cluster
 func (r *ClusterReconciler) reconcileDelete(ctx context.Context, cluster *clusterv1.Cluster) (reconcile.Result, error) {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 
+	logger.Info("Deleting cluster")
 	descendants, err := r.listDescendants(ctx, cluster)
 	if err != nil {
 		logger.Error(err, "Failed to list descendants")

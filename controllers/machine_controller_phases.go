@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"encoding/json"
+
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
+
 	//"log"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
@@ -125,7 +127,6 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		m.Status.SetTypedPhase(clusterv1.MachinePhasePending)
 	}
 
-	oldPhase := m.Status.GetTypedPhase()
 	// Set the phase to "provisioning" if bootstrap is ready and the infrastructure isn't.
 	if m.Status.BootstrapReady && !m.Status.InfrastructureReady {
 		m.Status.SetTypedPhase(clusterv1.MachinePhaseProvisioning)
@@ -153,23 +154,29 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 
 	// If the phase has changed, update the LastUpdated timestamp
 	if m.Status.Phase != originalPhase {
+		updateCluster := false
+		patchHelper, err := patch.NewHelper(cluster, r.Client)
+		if err != nil {
+			r.Log.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
+		}
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
 		newPhase := m.Status.GetTypedPhase()
-		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && oldPhase != clusterv1.MachinePhaseRunning && cluster != nil {
+		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && cluster != nil {
 			setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
-			if err := c.Update(context.TODO(), cluster); err != nil {
-				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
-			}
+			updateCluster = true
 		}
 		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
 			capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
 			if err != nil {
-				r.Log.Info(fmt.Sprintf("Failed to get cluster resources with error: %v", err))
+				r.Log.Error(err, "failed to get cluster resources")
 			}
 			setAnnotation(cluster, capacityResAnnotation, capacity)
-			if err := c.Update(context.TODO(), cluster); err != nil {
-				r.Log.Info(fmt.Sprintf("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name))
+			updateCluster = true
+		}
+		if updateCluster && patchHelper != nil {
+			if err := patchHelper.Patch(context.TODO(), cluster); err != nil {
+				r.Log.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
 			}
 		}
 	}

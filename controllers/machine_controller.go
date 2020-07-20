@@ -244,6 +244,7 @@ func (r *MachineReconciler) reconcileDelete(ctx context.Context, cluster *cluste
 	logger := r.Log.WithValues("machine", m.Name, "namespace", m.Namespace)
 	logger = logger.WithValues("cluster", cluster.Name)
 
+	logger.Info("Deleting machine")
 	err := r.isDeleteNodeAllowed(ctx, cluster, m)
 	isDeleteNodeAllowed := err == nil
 	if err != nil {
