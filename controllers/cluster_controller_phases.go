@@ -34,9 +34,32 @@ import (
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
+
+// Check if the cluster has atleast one control plane in running state
+func (r *ClusterReconciler) isClusterRunning(cluster *clusterv1.Cluster) bool {
+	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	listOptions := []client.ListOption{
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(map[string]string{clusterv1.ClusterLabelName: cluster.Name, clusterv1.MachineControlPlaneLabelName: "true"}),
+	}
+
+	var machines clusterv1.MachineList
+	if err := r.Client.List(context.TODO(), &machines, listOptions...); err != nil {
+		logger.Error(err, "failed to list Machines for cluster %s/%s", cluster.Namespace, cluster.Name)
+		return false
+	}
+	for _, machine := range machines.Items {
+		phase := machine.Status.GetTypedPhase()
+		if phase == clusterv1.MachinePhaseRunning {
+			return true
+		}
+	}
+	return false
+}
 
 func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1.Cluster) {
 	if cluster.Status.Phase == "" {
@@ -51,7 +74,7 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioned)
 	}
 
-	if isClusterRunning(cluster) {
+	if r.isClusterRunning(cluster) {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
 	}
 
@@ -142,7 +165,7 @@ func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster
 	if isClusterExternallyProvisioned(cluster) {
 		cluster.Status.InfrastructureReady = true
 		setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
-		capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+		capacity, err := GetClusterResources(cluster, r.Client, r.scheme, "")
 		if err != nil {
 			logger.V(3).Info("Failed to get cluster resources with error: %v", err)
 			return err
@@ -274,21 +297,22 @@ func (r *ClusterReconciler) reconcileKubeconfig(ctx context.Context, cluster *cl
 		return errors.Wrapf(err, "failed to retrieve Kubeconfig Secret for Cluster %q in namespace %q", cluster.Name, cluster.Namespace)
 	}
 
-	if isClusterExternallyProvisioned(cluster) {
-		patchHelper, err := patch.NewHelper(s, r.Client)
-		if err != nil {
-			return errors.Wrapf(err, "failed to create patch helper for secret %s", s.Name)
-		}
-
+	// Make sure the ownerReference is set for the secret
+	if !util.HasOwnerRef(s.GetOwnerReferences(), metav1.OwnerReference{
+		APIVersion: clusterv1.GroupVersion.String(),
+		Kind:       "Cluster",
+		Name:       cluster.Name,
+		UID:        cluster.UID,
+	}) {
 		s.SetOwnerReferences(util.EnsureOwnerRef(s.GetOwnerReferences(), metav1.OwnerReference{
 			APIVersion: clusterv1.GroupVersion.String(),
 			Kind:       "Cluster",
 			Name:       cluster.Name,
 			UID:        cluster.UID,
 		}))
-
-		if err := patchHelper.Patch(ctx, s); err != nil {
-			return errors.Wrapf(err, "failed to patch secret %s", s.Name)
+		err := r.Client.Update(context.TODO(), s)
+		if err != nil {
+			return errors.Wrapf(err, "failed to update secret %s", s.Name)
 		}
 	}
 

@@ -192,6 +192,10 @@ func (r *MachineReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 			UID:        cluster.UID,
 		})
 	}
+	f := m.GetFinalizers()
+	if 0 == len(f) {
+		logger.Info(fmt.Sprintf("Creating machine"))
+	}
 
 	// If the Machine doesn't have a finalizer, add one.
 	controllerutil.AddFinalizer(m, clusterv1.MachineFinalizer)

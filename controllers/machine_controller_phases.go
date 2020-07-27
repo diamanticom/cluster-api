@@ -64,7 +64,7 @@ func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) 
 	cluster.SetAnnotations(annotations)
 }
 
-func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme) (string, error) {
+func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme, exclude_machine_name string) (string, error) {
 	restConfig, err := remote.RESTConfig(context.TODO(), c, util.ObjectKey(cluster))
 	if err != nil {
 		return "", err
@@ -81,7 +81,9 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		//klog.Infof("Node %s allocatable %v", node.Name, AresourceList)
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
-
+		if exclude_machine_name == node.Name {
+			continue
+		}
 		CresourceList := node.Status.Capacity
 		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
 		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
@@ -162,17 +164,18 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
 		newPhase := m.Status.GetTypedPhase()
-		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && cluster != nil {
-			setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
-			updateCluster = true
-		}
 		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
-			capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+			exclude_machine_name := ""
+			if newPhase != clusterv1.MachinePhaseRunning {
+				exclude_machine_name = m.Name
+			}
+			capacity, err := GetClusterResources(cluster, r.Client, r.scheme, exclude_machine_name)
 			if err != nil {
 				r.Log.Error(err, "failed to get cluster resources")
+			} else {
+				setAnnotation(cluster, capacityResAnnotation, capacity)
+				updateCluster = true
 			}
-			setAnnotation(cluster, capacityResAnnotation, capacity)
-			updateCluster = true
 		}
 		if updateCluster && patchHelper != nil {
 			if err := patchHelper.Patch(context.TODO(), cluster); err != nil {

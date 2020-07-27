@@ -73,7 +73,7 @@ PROD_REGISTRY ?= us.gcr.io/k8s-artifacts-prod/cluster-api
 # core
 IMAGE_NAME ?= cluster-api-controller
 CONTROLLER_IMG ?= diamanti/capi
-TAG ?= v0.3.3.7
+TAG ?= v0.3.3.8
 
 # bootstrap
 KUBEADM_BOOTSTRAP_IMAGE_NAME ?= kubeadm-bootstrap-controller

@@ -54,6 +54,7 @@ const (
 	// deletion.
 	deleteRequeueAfter        = 5 * time.Second
 	K8SProvisioned            = "true"
+	K8SNotProvisioned         = "false"
 	KLabelExternalProvisioned = "spektra.diamanti.io/externally-provisioned"
 	KLabelClusterRunning      = "spektra.diamanti.io/cluster-running"
 	allocResAnnotation        = "spektra.diamanti.io/allocatable-resources"
@@ -152,6 +153,10 @@ func (r *ClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cluster) (ctrl.Result, error) {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 
+	f := cluster.GetFinalizers()
+	if 0 == len(f) {
+		logger.Info(fmt.Sprintf("Creating cluster"))
+	}
 	// If object doesn't have a finalizer, add one.
 	controllerutil.AddFinalizer(cluster, clusterv1.ClusterFinalizer)
 	tenantDataSecret := &corev1.Secret{}
@@ -537,15 +542,6 @@ func (r *ClusterReconciler) controlPlaneMachineToCluster(o handler.MapObject) []
 func isClusterExternallyProvisioned(cluster *clusterv1.Cluster) bool {
 	annotations := cluster.ObjectMeta.GetAnnotations()
 	if annotations != nil && annotations[KLabelExternalProvisioned] == K8SProvisioned {
-		return true
-	}
-	return false
-}
-
-// Check if the cluster has atleast one control plane in running state
-func isClusterRunning(cluster *clusterv1.Cluster) bool {
-	annotations := cluster.ObjectMeta.GetAnnotations()
-	if annotations != nil && annotations[KLabelClusterRunning] == K8SProvisioned {
 		return true
 	}
 	return false
