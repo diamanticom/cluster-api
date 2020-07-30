@@ -34,29 +34,15 @@ import (
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 // Check if the cluster has atleast one control plane in running state
-func (r *ClusterReconciler) isClusterRunning(cluster *clusterv1.Cluster) bool {
-	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
-	listOptions := []client.ListOption{
-		client.InNamespace(cluster.Namespace),
-		client.MatchingLabels(map[string]string{clusterv1.ClusterLabelName: cluster.Name, clusterv1.MachineControlPlaneLabelName: "true"}),
-	}
-
-	var machines clusterv1.MachineList
-	if err := r.Client.List(context.TODO(), &machines, listOptions...); err != nil {
-		logger.Error(err, "failed to list Machines for cluster %s/%s", cluster.Namespace, cluster.Name)
-		return false
-	}
-	for _, machine := range machines.Items {
-		phase := machine.Status.GetTypedPhase()
-		if phase == clusterv1.MachinePhaseRunning {
-			return true
-		}
+func isClusterRunning(cluster *clusterv1.Cluster) bool {
+	annotations := cluster.ObjectMeta.GetAnnotations()
+	if annotations != nil && annotations[KLabelClusterRunning] == K8SProvisioned {
+		return true
 	}
 	return false
 }
@@ -74,7 +60,7 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioned)
 	}
 
-	if r.isClusterRunning(cluster) {
+	if isClusterRunning(cluster) {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
 	}
 

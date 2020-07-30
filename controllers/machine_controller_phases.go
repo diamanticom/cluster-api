@@ -121,7 +121,39 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 	return string(capacity), nil
 }
 
+// Check if the cluster control planes are in running state
+func (r *MachineReconciler) isControlPlanesRunning(cluster *clusterv1.Cluster, curMachine *clusterv1.Machine) bool {
+	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	listOptions := []client.ListOption{
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(map[string]string{clusterv1.ClusterLabelName: cluster.Name}),
+	}
+
+	var machines clusterv1.MachineList
+	isrunning := false
+	if err := r.Client.List(context.TODO(), &machines, listOptions...); err != nil {
+		logger.Error(err, "failed to list Machines for cluster %s/%s", cluster.Namespace, cluster.Name)
+		return isrunning
+	}
+
+	for _, machine := range machines.Items {
+		if curMachine.Name == machine.Name {
+			continue
+		}
+		// Exclude non-control-plane machines
+		if _, ok := machine.GetLabels()[clusterv1.MachineControlPlaneLabelName]; !ok {
+			continue
+		}
+		if machine.Status.Phase != "Running" {
+			return isrunning
+		}
+	}
+
+	return true
+}
+
 func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machine, c client.Client, cluster *clusterv1.Cluster) {
+	logger := r.Log.WithValues("machine", m.Name, "namespace", m.Namespace)
 	originalPhase := m.Status.Phase
 
 	// Set the phase to "pending" if nil.
@@ -159,11 +191,28 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		updateCluster := false
 		patchHelper, err := patch.NewHelper(cluster, r.Client)
 		if err != nil {
-			r.Log.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
+			logger.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
 		}
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
 		newPhase := m.Status.GetTypedPhase()
+		if util.IsControlPlaneMachine(m) {
+			updateCluster = true
+			if newPhase == clusterv1.MachinePhaseRunning {
+				if r.isControlPlanesRunning(cluster, m) {
+					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+				}
+			} else if newPhase == clusterv1.MachinePhaseDeleted || newPhase == clusterv1.MachinePhaseDeleting {
+				if !r.isControlPlanesRunning(cluster, m) {
+					setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
+				} else {
+					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+				}
+			} else {
+				setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
+			}
+
+		}
 		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
 			exclude_machine_name := ""
 			if newPhase != clusterv1.MachinePhaseRunning {
@@ -171,7 +220,7 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 			}
 			capacity, err := GetClusterResources(cluster, r.Client, r.scheme, exclude_machine_name)
 			if err != nil {
-				r.Log.Error(err, "failed to get cluster resources")
+				logger.Error(err, "failed to get cluster resources")
 			} else {
 				setAnnotation(cluster, capacityResAnnotation, capacity)
 				updateCluster = true
@@ -179,7 +228,7 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		}
 		if updateCluster && patchHelper != nil {
 			if err := patchHelper.Patch(context.TODO(), cluster); err != nil {
-				r.Log.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
+				logger.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
 			}
 		}
 	}
