@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
 
-	//"log"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/remote"
@@ -104,7 +103,6 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		(&clusterCGPUResource).Set((&clusterCGPUResource).Value() + (&nodeCGPUResource).Value())
 		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + ((&nodeCMemoryResource).Value())/(1024*1024*1024))
 
-		//log.Printf("Node %s is %+v, %+v", node.Name, nodeCMemoryResource, clusterCMemoryResource)
 		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
 		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
@@ -213,7 +211,8 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 			}
 
 		}
-		if newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting {
+
+		if m.Spec.InfrastructureRef.Kind != "DiamantiMachine" && (newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting) {
 			exclude_machine_name := ""
 			if newPhase != clusterv1.MachinePhaseRunning {
 				exclude_machine_name = m.Name

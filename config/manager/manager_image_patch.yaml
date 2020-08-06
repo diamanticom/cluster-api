@@ -7,5 +7,5 @@ spec:
   template:
     spec:
       containers:
-      - image: diamanti/capi:v0.3.3.9
+      - image: diamanti/capi:v0.3.3.10
         name: manager
