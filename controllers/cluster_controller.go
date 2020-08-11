@@ -57,6 +57,7 @@ const (
 	K8SNotProvisioned         = "false"
 	KLabelExternalProvisioned = "spektra.diamanti.io/externally-provisioned"
 	KLabelClusterRunning      = "spektra.diamanti.io/cluster-running"
+	KLabelProvider            = "spektra.diamanti.io/provider"
 	allocResAnnotation        = "spektra.diamanti.io/allocatable-resources"
 	capacityResAnnotation     = "spektra.diamanti.io/capacity-resources"
 )

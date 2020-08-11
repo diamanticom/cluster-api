@@ -34,9 +34,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
 
+	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/remote"
+	cacpkv1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
 	utilconversion "sigs.k8s.io/cluster-api/util/conversion"
@@ -134,6 +136,25 @@ func (r *MachineReconciler) isControlPlanesRunning(cluster *clusterv1.Cluster, c
 		return isrunning
 	}
 
+	var provider string
+	var ok bool
+	if provider, ok = cluster.GetLabels()[KLabelProvider]; !ok {
+		logger.Info("failed to get provider label for cluster")
+		return isrunning
+	}
+	if provider == "azure" {
+		name := fmt.Sprintf("%s-control-plane", cluster.Name)
+		kcp := &cacpkv1.KubeadmControlPlane{}
+		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: cluster.Namespace}, kcp); err != nil {
+			logger.Error(err, "failed to get KCP for cluster %s/%s", cluster.Namespace, cluster.Name)
+			return isrunning
+		}
+		if kcp.Spec.Replicas != nil {
+			if *kcp.Spec.Replicas != kcp.Status.Replicas {
+				return isrunning
+			}
+		}
+	}
 	for _, machine := range machines.Items {
 		if curMachine.Name == machine.Name {
 			continue

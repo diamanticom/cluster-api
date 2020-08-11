@@ -33,6 +33,7 @@ import (
 	clusterv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	clusterv1alpha3 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers"
+	cacpkv1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	expv1alpha3 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
 	expcontrollers "sigs.k8s.io/cluster-api/exp/controllers"
 	"sigs.k8s.io/cluster-api/feature"
@@ -75,6 +76,7 @@ func init() {
 	_ = clusterv1alpha3.AddToScheme(scheme)
 	_ = expv1alpha3.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
+	_ = cacpkv1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 
