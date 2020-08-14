@@ -79,12 +79,20 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 	clusterCResourceMap := make(corev1.ResourceList)
 	nodes, err := remoteClient.CoreV1().Nodes().List(metav1.ListOptions{})
 	for _, node := range nodes.Items {
-		//klog.Infof("Node %s allocatable %v", node.Name, AresourceList)
-		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
-		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		if exclude_machine_name == node.Name {
 			continue
 		}
+		/* // If we need to exclude control plane nodes from cluster capacity, use this
+		var is_control_plane bool = false
+		for _, taint := range node.Spec.Taints {
+			if taint.Key == "node-role.kubernetes.io/master" {
+				is_control_plane = true
+				break
+			}
+		}
+		if is_control_plane {
+			continue
+		}*/
 		CresourceList := node.Status.Capacity
 		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
 		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
@@ -95,7 +103,7 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		}
 		clusterCMemoryResource, ok := clusterCResourceMap[corev1.ResourceMemory]
 		if !ok {
-			clusterCMemoryResource = *resource.NewQuantity(0, resource.BinarySI)
+			clusterCMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
 		clusterCGPUResource, ok := clusterCResourceMap[ResourceGPU]
 		if !ok {
@@ -103,16 +111,12 @@ func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *ru
 		}
 		(&clusterCCPUResource).Set((&clusterCCPUResource).Value() + (&nodeCCPUResource).Value())
 		(&clusterCGPUResource).Set((&clusterCGPUResource).Value() + (&nodeCGPUResource).Value())
-		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + ((&nodeCMemoryResource).Value())/(1024*1024*1024))
-
-		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
-		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
+		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + (&nodeCMemoryResource).Value())
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
 		clusterCResourceMap[corev1.ResourceMemory] = clusterCMemoryResource
 		clusterCResourceMap[ResourceGPU] = clusterCGPUResource
 	}
 
-	//klog.Infof("clusterResourceMap  %+v", clusterResourceMap)
 	capacity, err := json.Marshal(clusterCResourceMap)
 	if err != nil {
 		return "", err

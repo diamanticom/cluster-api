@@ -254,7 +254,7 @@ func (r *MachineReconciler) reconcileDelete(ctx context.Context, cluster *cluste
 	if err != nil {
 		switch err {
 		case errNoControlPlaneNodes, errLastControlPlaneNode, errNilNodeRef, errClusterIsBeingDeleted:
-			logger.Info("Deleting Kubernetes Node associated with Machine is not allowed", "node", m.Status.NodeRef, "cause", err)
+			logger.Error(err, "Deleting Kubernetes Node associated with Machine is not allowed", "node", m.Status.NodeRef, "cause", err)
 		default:
 			return ctrl.Result{}, errors.Wrapf(err, "failed to check if Kubernetes Node deletion is allowed")
 		}
@@ -327,7 +327,9 @@ func (r *MachineReconciler) isDeleteNodeAllowed(ctx context.Context, cluster *cl
 		// Do not delete the NodeRef if there are no remaining members of
 		// the control plane.
 		return errNoControlPlaneNodes
-	case numControlPlaneMachines == 1 && util.IsControlPlaneMachine(machine):
+		// When the last controlplane machine is deleted, the numControlPlaneMachines will be 0,
+		// since in getActiveMachinesInCluster() machines which have deletionTimestamp set are ignored
+	case numControlPlaneMachines == 0 && util.IsControlPlaneMachine(machine):
 		// Do not delete the NodeRef if this is the last member of the
 		// control plane.
 		return errLastControlPlaneNode
