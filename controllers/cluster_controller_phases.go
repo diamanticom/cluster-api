@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
@@ -48,6 +49,7 @@ func isClusterRunning(cluster *clusterv1.Cluster) bool {
 }
 
 func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1.Cluster) {
+	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 	if cluster.Status.Phase == "" {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhasePending)
 	}
@@ -61,7 +63,25 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 	}
 
 	if isClusterRunning(cluster) {
-		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
+		retries := 300
+		for {
+			if retries == 0 {
+				break
+			}
+			kubeconfigProxySecret := &corev1.Secret{}
+			secretName := fmt.Sprintf("%s-kubeconfig-proxy", cluster.Name)
+
+			err := r.Client.Get(context.TODO(),
+				types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, kubeconfigProxySecret)
+			if err == nil {
+				logger.Info("Cluster initialized by tenant controller, moving to Running phase")
+				cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
+				break
+			} else {
+				time.Sleep(1 * time.Second)
+				retries--
+			}
+		}
 	}
 
 	if cluster.Status.FailureReason != nil || cluster.Status.FailureMessage != nil {
