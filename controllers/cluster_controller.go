@@ -131,8 +131,6 @@ func (r *ClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 	}
 
 	defer func() {
-		// Always reconcile the Status.Phase field.
-		r.reconcilePhase(ctx, cluster)
 		r.reconcileMetrics(ctx, cluster)
 
 		// Always attempt to Patch the Cluster object and status after each reconciliation.
@@ -190,6 +188,7 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 		r.reconcileControlPlane(ctx, cluster),
 		r.reconcileKubeconfig(ctx, cluster),
 		r.reconcileControlPlaneInitialized(ctx, cluster),
+		r.reconcilePhase(ctx, cluster),
 	}
 
 	// Parse the errors, making sure we record if there is a RequeueAfterError.

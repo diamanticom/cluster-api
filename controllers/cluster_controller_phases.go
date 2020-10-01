@@ -19,12 +19,17 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"time"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
@@ -38,6 +43,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
+const deploymentName = "enforcer-prod"
+const deploymentNamespace = "kube-system"
+
 // Check if the cluster has atleast one control plane in running state
 func isClusterRunning(cluster *clusterv1.Cluster) bool {
 	annotations := cluster.ObjectMeta.GetAnnotations()
@@ -47,7 +55,63 @@ func isClusterRunning(cluster *clusterv1.Cluster) bool {
 	return false
 }
 
-func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1.Cluster) {
+func (r *ClusterReconciler) isTenantClusterReady(cluster *clusterv1.Cluster) bool {
+	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+
+	obj := &corev1.Secret{}
+	secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+	err := r.Client.Get(context.TODO(),
+		types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, obj)
+	if err != nil {
+		return false
+	}
+	token, ok := obj.Data["value"]
+	if !ok {
+		token, ok = obj.Data["config"]
+		if !ok {
+			logger.Info(fmt.Sprintf("Cluster %s-kubeconfig secret not found", cluster.Name))
+			return false
+		}
+	}
+	dir := os.TempDir()
+	tmpFile, err := ioutil.TempFile(dir, "tkubeconfig-")
+	if err != nil {
+		logger.Info(fmt.Sprintf("tempfile create failed for cluster %s status: %v ", cluster.Name, err))
+		return false
+	}
+
+	// Remember to clean up the file afterwards
+	defer os.Remove(dir)
+
+	err = ioutil.WriteFile(tmpFile.Name(), token, 0644)
+	if err != nil {
+		logger.Info(fmt.Sprintf("tempfile write failed for cluster %s,status: %v ", err))
+		return false
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", tmpFile.Name())
+	if err != nil {
+		logger.Info(fmt.Sprintf("Cluster %s clientcmd config not found", cluster.Name))
+		return false
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		logger.Info(fmt.Sprintf("Cluster %s clientset not found", cluster.Name))
+		return false
+	}
+
+	deploymentsClient := clientset.AppsV1().Deployments(deploymentNamespace)
+
+	deployment, err := deploymentsClient.Get(deploymentName, metav1.GetOptions{})
+
+	if err == nil && deployment.Status.AvailableReplicas > 0 {
+		logger.Info("Cluster initialized by tenant controller, moving to Running phase")
+		return true
+	}
+	return false
+}
+
+func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1.Cluster) error {
 	if cluster.Status.Phase == "" {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhasePending)
 	}
@@ -61,6 +125,9 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 	}
 
 	if isClusterRunning(cluster) {
+		if r.isTenantClusterReady(cluster) == false {
+			return errors.New("Cluster still not ready to be used")
+		}
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
 	}
 
@@ -71,6 +138,7 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 	if !cluster.DeletionTimestamp.IsZero() {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseDeleting)
 	}
+	return nil
 }
 
 // reconcileExternal handles generic unstructured objects referenced by a Cluster.
