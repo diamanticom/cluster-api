@@ -17,7 +17,6 @@ limitations under the License.
 package remote
 
 import (
-	"context"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -52,7 +51,7 @@ var (
 	validKubeConfig = `
 clusters:
 - cluster:
-    server: https://test-cluster-api:6443
+    server: https://test-cluster-api.nodomain.example.com:6443
   name: test-cluster-api
 contexts:
 - context:
@@ -92,26 +91,25 @@ func TestNewClusterClient(t *testing.T) {
 
 	testScheme := runtime.NewScheme()
 	g.Expect(scheme.AddToScheme(testScheme)).To(Succeed())
-	ctx := context.Background()
 	t.Run("cluster with valid kubeconfig", func(t *testing.T) {
 		gs := NewWithT(t)
 
 		client := fake.NewFakeClientWithScheme(testScheme, validSecret)
-		_, err := NewClusterClient(ctx, client, clusterWithValidKubeConfig, testScheme)
+		_, err := NewClusterClient(ctx, client, clusterWithValidKubeConfig)
 		// Since we do not have a remote server to connect to, we should expect to get
 		// an error to that effect for the purpose of this test.
 		gs.Expect(err).To(MatchError(ContainSubstring("no such host")))
 
 		restConfig, err := RESTConfig(ctx, client, clusterWithValidKubeConfig)
 		gs.Expect(err).NotTo(HaveOccurred())
-		gs.Expect(restConfig.Host).To(Equal("https://test-cluster-api:6443"))
+		gs.Expect(restConfig.Host).To(Equal("https://test-cluster-api.nodomain.example.com:6443"))
 	})
 
 	t.Run("cluster with no kubeconfig", func(t *testing.T) {
 		gs := NewWithT(t)
 
 		client := fake.NewFakeClientWithScheme(testScheme)
-		_, err := NewClusterClient(ctx, client, clusterWithNoKubeConfig, testScheme)
+		_, err := NewClusterClient(ctx, client, clusterWithNoKubeConfig)
 		gs.Expect(err).To(MatchError(ContainSubstring("not found")))
 	})
 
@@ -119,7 +117,7 @@ func TestNewClusterClient(t *testing.T) {
 		gs := NewWithT(t)
 
 		client := fake.NewFakeClientWithScheme(testScheme, invalidSecret)
-		_, err := NewClusterClient(ctx, client, clusterWithInvalidKubeConfig, testScheme)
+		_, err := NewClusterClient(ctx, client, clusterWithInvalidKubeConfig)
 		gs.Expect(err).To(HaveOccurred())
 		gs.Expect(apierrors.IsNotFound(err)).To(BeFalse())
 	})

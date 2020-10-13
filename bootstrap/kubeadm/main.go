@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"math/rand"
 	"net/http"
@@ -27,18 +28,17 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 	"k8s.io/klog/klogr"
 	clusterv1alpha3 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	kubeadmbootstrapv1alpha2 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1alpha2"
 	kubeadmbootstrapv1alpha3 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1alpha3"
 	kubeadmbootstrapcontrollers "sigs.k8s.io/cluster-api/bootstrap/kubeadm/controllers"
+	"sigs.k8s.io/cluster-api/cmd/version"
 	expv1alpha3 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/feature"
+	"sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	// +kubebuilder:scaffold:imports
 )
@@ -83,7 +83,7 @@ func InitFlags(fs *pflag.FlagSet) {
 		"Interval at which non-leader candidates will wait to force acquire leadership (duration string)")
 
 	fs.DurationVar(&leaderElectionRenewDeadline, "leader-election-renew-deadline", 10*time.Second,
-		"Duration that the acting master will retry refreshing leadership before giving up (duration string)")
+		"Duration that the leading controller manager will retry refreshing leadership before giving up (duration string)")
 
 	fs.DurationVar(&leaderElectionRetryPeriod, "leader-election-retry-period", 2*time.Second,
 		"Duration the LeaderElector clients should wait between tries of actions (duration string)")
@@ -135,7 +135,7 @@ func main() {
 		RetryPeriod:        &leaderElectionRetryPeriod,
 		Namespace:          watchNamespace,
 		SyncPeriod:         &syncPeriod,
-		NewClient:          newClientFunc,
+		NewClient:          util.ManagerDelegatingClientFunc,
 		Port:               webhookPort,
 	})
 	if err != nil {
@@ -143,26 +143,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup the context that's going to be used in controllers and for the manager.
+	ctx := ctrl.SetupSignalHandler()
+
 	setupWebhooks(mgr)
-	setupReconcilers(mgr)
+	setupReconcilers(ctx, mgr)
 
 	// +kubebuilder:scaffold:builder
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	setupLog.Info("starting manager", "version", version.Get().String())
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
 }
 
-func setupReconcilers(mgr ctrl.Manager) {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager) {
 	if webhookPort != 0 {
 		return
 	}
 
 	if err := (&kubeadmbootstrapcontrollers.KubeadmConfigReconciler{
 		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("KubeadmConfig"),
-	}).SetupWithManager(mgr, concurrency(kubeadmConfigConcurrency)); err != nil {
+	}).SetupWithManager(ctx, mgr, concurrency(kubeadmConfigConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KubeadmConfig")
 		os.Exit(1)
 	}
@@ -193,21 +195,4 @@ func setupWebhooks(mgr ctrl.Manager) {
 
 func concurrency(c int) controller.Options {
 	return controller.Options{MaxConcurrentReconciles: c}
-}
-
-// newClientFunc returns a client reads from cache and write directly to the server
-// this avoid get unstructured object directly from the server
-// see issue: https://github.com/kubernetes-sigs/cluster-api/issues/1663
-func newClientFunc(cache cache.Cache, config *rest.Config, options client.Options) (client.Client, error) {
-	// Create the Client for Write operations.
-	c, err := client.New(config, options)
-	if err != nil {
-		return nil, err
-	}
-
-	return &client.DelegatingClient{
-		Reader:       cache,
-		Writer:       c,
-		StatusClient: c,
-	}, nil
 }

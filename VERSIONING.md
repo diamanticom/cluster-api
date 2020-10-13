@@ -61,7 +61,7 @@ a:
 - Non-breaking feature: :sparkles: (`:sparkles:`)
 - Patch fix: :bug: (`:bug:`)
 - Docs: :book: (`:book:`)
-- Infra/Tests/Other: :running: (`:running:`)
+- Infra/Tests/Other: :seedling: (`:seedling:`)
 
 You can also use the equivalent emoji directly, since GitHub doesn't
 render the `:xyz:` aliases in PR titles.
@@ -77,7 +77,7 @@ separately.
 Cluster API follows the standard Kubernetes workflow: any PR needs
 `lgtm` and `approved` labels, PRs authors must have signed the CNCF CLA,
 and PRs must pass the tests before being merged.  See [the contributor
-docs](https://github.com/kubernetes/community/blob/master/contributors/guide/pull-requests.md#the-testing-and-merge-workflow)
+docs](https://git.k8s.io/community/contributors/guide/pull-requests.md#the-testing-and-merge-workflow)
 for more info.
 
 We use the same priority and kind labels as Kubernetes.  See the labels

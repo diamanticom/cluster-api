@@ -16,6 +16,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"math/rand"
 	"net/http"
@@ -27,18 +28,20 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 	"k8s.io/klog/klogr"
 	clusterv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	clusterv1alpha3 "sigs.k8s.io/cluster-api/api/v1alpha3"
+	"sigs.k8s.io/cluster-api/cmd/version"
 	"sigs.k8s.io/cluster-api/controllers"
+	"sigs.k8s.io/cluster-api/controllers/remote"
+	addonsv1alpha3 "sigs.k8s.io/cluster-api/exp/addons/api/v1alpha3"
+	addonscontrollers "sigs.k8s.io/cluster-api/exp/addons/controllers"
 	expv1alpha3 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
 	expcontrollers "sigs.k8s.io/cluster-api/exp/controllers"
 	"sigs.k8s.io/cluster-api/feature"
+	"sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	// +kubebuilder:scaffold:imports
@@ -61,6 +64,7 @@ var (
 	machineSetConcurrency         int
 	machineDeploymentConcurrency  int
 	machinePoolConcurrency        int
+	clusterResourceSetConcurrency int
 	machineHealthCheckConcurrency int
 	syncPeriod                    time.Duration
 	webhookPort                   int
@@ -74,6 +78,7 @@ func init() {
 	_ = clusterv1alpha2.AddToScheme(scheme)
 	_ = clusterv1alpha3.AddToScheme(scheme)
 	_ = expv1alpha3.AddToScheme(scheme)
+	_ = addonsv1alpha3.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
@@ -90,7 +95,7 @@ func InitFlags(fs *pflag.FlagSet) {
 		"Interval at which non-leader candidates will wait to force acquire leadership (duration string)")
 
 	fs.DurationVar(&leaderElectionRenewDeadline, "leader-election-renew-deadline", 10*time.Second,
-		"Duration that the acting master will retry refreshing leadership before giving up (duration string)")
+		"Duration that the leading controller manager will retry refreshing leadership before giving up (duration string)")
 
 	fs.DurationVar(&leaderElectionRetryPeriod, "leader-election-retry-period", 2*time.Second,
 		"Duration the LeaderElector clients should wait between tries of actions (duration string)")
@@ -115,6 +120,9 @@ func InitFlags(fs *pflag.FlagSet) {
 
 	fs.IntVar(&machinePoolConcurrency, "machinepool-concurrency", 10,
 		"Number of machine pools to process simultaneously")
+
+	fs.IntVar(&clusterResourceSetConcurrency, "clusterresourceset-concurrency", 10,
+		"Number of cluster resource sets to process simultaneously")
 
 	fs.IntVar(&machineHealthCheckConcurrency, "machinehealthcheck-concurrency", 10,
 		"Number of machine health checks to process simultaneously")
@@ -157,7 +165,7 @@ func main() {
 		RetryPeriod:            &leaderElectionRetryPeriod,
 		Namespace:              watchNamespace,
 		SyncPeriod:             &syncPeriod,
-		NewClient:              newClientFunc,
+		NewClient:              util.ManagerDelegatingClientFunc,
 		Port:                   webhookPort,
 		HealthProbeBindAddress: healthAddr,
 	})
@@ -166,13 +174,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup the context that's going to be used in controllers and for the manager.
+	ctx := ctrl.SetupSignalHandler()
+
 	setupChecks(mgr)
-	setupReconcilers(mgr)
+	setupReconcilers(ctx, mgr)
 	setupWebhooks(mgr)
 
 	// +kubebuilder:scaffold:builder
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	setupLog.Info("starting manager", "version", version.Get().String())
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
@@ -190,35 +201,53 @@ func setupChecks(mgr ctrl.Manager) {
 	}
 }
 
-func setupReconcilers(mgr ctrl.Manager) {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager) {
 	if webhookPort != 0 {
 		return
 	}
+
+	// Set up a ClusterCacheTracker and ClusterCacheReconciler to provide to controllers
+	// requiring a connection to a remote cluster
+	tracker, err := remote.NewClusterCacheTracker(
+		ctrl.Log.WithName("remote").WithName("ClusterCacheTracker"),
+		mgr,
+	)
+	if err != nil {
+		setupLog.Error(err, "unable to create cluster cache tracker")
+		os.Exit(1)
+	}
+	if err := (&remote.ClusterCacheReconciler{
+		Client:  mgr.GetClient(),
+		Log:     ctrl.Log.WithName("remote").WithName("ClusterCacheReconciler"),
+		Tracker: tracker,
+	}).SetupWithManager(ctx, mgr, concurrency(clusterConcurrency)); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ClusterCacheReconciler")
+		os.Exit(1)
+	}
+
 	if err := (&controllers.ClusterReconciler{
 		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("Cluster"),
-	}).SetupWithManager(mgr, concurrency(clusterConcurrency)); err != nil {
+	}).SetupWithManager(ctx, mgr, concurrency(clusterConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Cluster")
 		os.Exit(1)
 	}
 	if err := (&controllers.MachineReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("Machine"),
-	}).SetupWithManager(mgr, concurrency(machineConcurrency)); err != nil {
+		Client:  mgr.GetClient(),
+		Tracker: tracker,
+	}).SetupWithManager(ctx, mgr, concurrency(machineConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
 	}
 	if err := (&controllers.MachineSetReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("MachineSet"),
-	}).SetupWithManager(mgr, concurrency(machineSetConcurrency)); err != nil {
+		Client:  mgr.GetClient(),
+		Tracker: tracker,
+	}).SetupWithManager(ctx, mgr, concurrency(machineSetConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MachineSet")
 		os.Exit(1)
 	}
 	if err := (&controllers.MachineDeploymentReconciler{
 		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("MachineDeployment"),
-	}).SetupWithManager(mgr, concurrency(machineDeploymentConcurrency)); err != nil {
+	}).SetupWithManager(ctx, mgr, concurrency(machineDeploymentConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MachineDeployment")
 		os.Exit(1)
 	}
@@ -226,16 +255,32 @@ func setupReconcilers(mgr ctrl.Manager) {
 	if feature.Gates.Enabled(feature.MachinePool) {
 		if err := (&expcontrollers.MachinePoolReconciler{
 			Client: mgr.GetClient(),
-			Log:    ctrl.Log.WithName("controllers").WithName("MachinePool"),
-		}).SetupWithManager(mgr, concurrency(machinePoolConcurrency)); err != nil {
+		}).SetupWithManager(ctx, mgr, concurrency(machinePoolConcurrency)); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "MachinePool")
 			os.Exit(1)
 		}
 	}
+
+	if feature.Gates.Enabled(feature.ClusterResourceSet) {
+		if err := (&addonscontrollers.ClusterResourceSetReconciler{
+			Client:  mgr.GetClient(),
+			Tracker: tracker,
+		}).SetupWithManager(ctx, mgr, concurrency(clusterResourceSetConcurrency)); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ClusterResourceSet")
+			os.Exit(1)
+		}
+		if err := (&addonscontrollers.ClusterResourceSetBindingReconciler{
+			Client: mgr.GetClient(),
+		}).SetupWithManager(ctx, mgr, concurrency(clusterResourceSetConcurrency)); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ClusterResourceSetBinding")
+			os.Exit(1)
+		}
+	}
+
 	if err := (&controllers.MachineHealthCheckReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("MachineHealthCheck"),
-	}).SetupWithManager(mgr, concurrency(machineHealthCheckConcurrency)); err != nil {
+		Client:  mgr.GetClient(),
+		Tracker: tracker,
+	}).SetupWithManager(ctx, mgr, concurrency(machineHealthCheckConcurrency)); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MachineHealthCheck")
 		os.Exit(1)
 	}
@@ -309,6 +354,13 @@ func setupWebhooks(mgr ctrl.Manager) {
 		}
 	}
 
+	if feature.Gates.Enabled(feature.ClusterResourceSet) {
+		if err := (&addonsv1alpha3.ClusterResourceSet{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "ClusterResourceSet")
+			os.Exit(1)
+		}
+	}
+
 	if err := (&clusterv1alpha3.MachineHealthCheck{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "MachineHealthCheck")
 		os.Exit(1)
@@ -317,21 +369,4 @@ func setupWebhooks(mgr ctrl.Manager) {
 
 func concurrency(c int) controller.Options {
 	return controller.Options{MaxConcurrentReconciles: c}
-}
-
-// newClientFunc returns a client reads from cache and write directly to the server
-// this avoid get unstructured object directly from the server
-// see issue: https://github.com/kubernetes-sigs/cluster-api/issues/1663
-func newClientFunc(cache cache.Cache, config *rest.Config, options client.Options) (client.Client, error) {
-	// Create the Client for Write operations.
-	c, err := client.New(config, options)
-	if err != nil {
-		return nil, err
-	}
-
-	return &client.DelegatingClient{
-		Reader:       cache,
-		Writer:       c,
-		StatusClient: c,
-	}, nil
 }

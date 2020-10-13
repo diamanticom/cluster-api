@@ -44,7 +44,7 @@ import (
 const (
 	rootOwnerValue = "root:root"
 
-	defaultCertificatesDir = "/etc/kubernetes/pki"
+	DefaultCertificatesDir = "/etc/kubernetes/pki"
 )
 
 var (
@@ -63,44 +63,47 @@ type Certificates []*Certificate
 
 // NewCertificatesForInitialControlPlane returns a list of certificates configured for a control plane node
 func NewCertificatesForInitialControlPlane(config *v1beta1.ClusterConfiguration) Certificates {
-	if config.CertificatesDir == "" {
-		config.CertificatesDir = defaultCertificatesDir
+	certificatesDir := DefaultCertificatesDir
+	if config != nil && config.CertificatesDir != "" {
+		certificatesDir = config.CertificatesDir
 	}
 
 	certificates := Certificates{
 		&Certificate{
 			Purpose:  ClusterCA,
-			CertFile: filepath.Join(config.CertificatesDir, "ca.crt"),
-			KeyFile:  filepath.Join(config.CertificatesDir, "ca.key"),
+			CertFile: filepath.Join(certificatesDir, "ca.crt"),
+			KeyFile:  filepath.Join(certificatesDir, "ca.key"),
 		},
 		&Certificate{
 			Purpose:  ServiceAccount,
-			CertFile: filepath.Join(config.CertificatesDir, "sa.pub"),
-			KeyFile:  filepath.Join(config.CertificatesDir, "sa.key"),
+			CertFile: filepath.Join(certificatesDir, "sa.pub"),
+			KeyFile:  filepath.Join(certificatesDir, "sa.key"),
 		},
 		&Certificate{
 			Purpose:  FrontProxyCA,
-			CertFile: filepath.Join(config.CertificatesDir, "front-proxy-ca.crt"),
-			KeyFile:  filepath.Join(config.CertificatesDir, "front-proxy-ca.key"),
+			CertFile: filepath.Join(certificatesDir, "front-proxy-ca.crt"),
+			KeyFile:  filepath.Join(certificatesDir, "front-proxy-ca.key"),
 		},
 	}
 
 	etcdCert := &Certificate{
 		Purpose:  EtcdCA,
-		CertFile: filepath.Join(config.CertificatesDir, "etcd", "ca.crt"),
-		KeyFile:  filepath.Join(config.CertificatesDir, "etcd", "ca.key"),
+		CertFile: filepath.Join(certificatesDir, "etcd", "ca.crt"),
+		KeyFile:  filepath.Join(certificatesDir, "etcd", "ca.key"),
 	}
 
 	// TODO make sure all the fields are actually defined and return an error if not
-	if config.Etcd.External != nil {
+	if config != nil && config.Etcd.External != nil {
 		etcdCert = &Certificate{
 			Purpose:  EtcdCA,
 			CertFile: config.Etcd.External.CAFile,
+			External: true,
 		}
 		apiserverEtcdClientCert := &Certificate{
 			Purpose:  APIServerEtcdClient,
 			CertFile: config.Etcd.External.CertFile,
 			KeyFile:  config.Etcd.External.KeyFile,
+			External: true,
 		}
 		certificates = append(certificates, apiserverEtcdClientCert)
 	}
@@ -110,35 +113,67 @@ func NewCertificatesForInitialControlPlane(config *v1beta1.ClusterConfiguration)
 }
 
 // NewCertificatesForJoiningControlPlane gets any certs that exist and writes them to disk
+//
+// Deprecated: this method is deprecated in favor of NewControlPlaneJoinCerts that
+// provides full support for the external etcd scenario.
 func NewCertificatesForJoiningControlPlane() Certificates {
-	return Certificates{
+	return NewControlPlaneJoinCerts(nil)
+}
+
+// NewControlPlaneJoinCerts gets any certs that exist and writes them to disk
+func NewControlPlaneJoinCerts(config *v1beta1.ClusterConfiguration) Certificates {
+	certificatesDir := DefaultCertificatesDir
+	if config != nil && config.CertificatesDir != "" {
+		certificatesDir = config.CertificatesDir
+	}
+
+	certificates := Certificates{
 		&Certificate{
 			Purpose:  ClusterCA,
-			CertFile: filepath.Join(defaultCertificatesDir, "ca.crt"),
-			KeyFile:  filepath.Join(defaultCertificatesDir, "ca.key"),
+			CertFile: filepath.Join(certificatesDir, "ca.crt"),
+			KeyFile:  filepath.Join(certificatesDir, "ca.key"),
 		},
 		&Certificate{
 			Purpose:  ServiceAccount,
-			CertFile: filepath.Join(defaultCertificatesDir, "sa.pub"),
-			KeyFile:  filepath.Join(defaultCertificatesDir, "sa.key"),
+			CertFile: filepath.Join(certificatesDir, "sa.pub"),
+			KeyFile:  filepath.Join(certificatesDir, "sa.key"),
 		},
 		&Certificate{
 			Purpose:  FrontProxyCA,
-			CertFile: filepath.Join(defaultCertificatesDir, "front-proxy-ca.crt"),
-			KeyFile:  filepath.Join(defaultCertificatesDir, "front-proxy-ca.key"),
-		},
-		&Certificate{
-			Purpose:  EtcdCA,
-			CertFile: filepath.Join(defaultCertificatesDir, "etcd", "ca.crt"),
-			KeyFile:  filepath.Join(defaultCertificatesDir, "etcd", "ca.key"),
+			CertFile: filepath.Join(certificatesDir, "front-proxy-ca.crt"),
+			KeyFile:  filepath.Join(certificatesDir, "front-proxy-ca.key"),
 		},
 	}
+	etcdCert := &Certificate{
+		Purpose:  EtcdCA,
+		CertFile: filepath.Join(certificatesDir, "etcd", "ca.crt"),
+		KeyFile:  filepath.Join(certificatesDir, "etcd", "ca.key"),
+	}
+
+	// TODO make sure all the fields are actually defined and return an error if not
+	if config != nil && config.Etcd.External != nil {
+		etcdCert = &Certificate{
+			Purpose:  EtcdCA,
+			CertFile: config.Etcd.External.CAFile,
+			External: true,
+		}
+		apiserverEtcdClientCert := &Certificate{
+			Purpose:  APIServerEtcdClient,
+			CertFile: config.Etcd.External.CertFile,
+			KeyFile:  config.Etcd.External.KeyFile,
+			External: true,
+		}
+		certificates = append(certificates, apiserverEtcdClientCert)
+	}
+
+	certificates = append(certificates, etcdCert)
+	return certificates
 }
 
 // NewCertificatesForWorker return an initialized but empty set of CA certificates needed to bootstrap a cluster.
 func NewCertificatesForWorker(caCertPath string) Certificates {
 	if caCertPath == "" {
-		caCertPath = filepath.Join(defaultCertificatesDir, "ca.crt")
+		caCertPath = filepath.Join(DefaultCertificatesDir, "ca.crt")
 	}
 
 	return Certificates{
@@ -171,6 +206,9 @@ func (c Certificates) Lookup(ctx context.Context, ctrlclient client.Client, clus
 		}
 		if err := ctrlclient.Get(ctx, key, s); err != nil {
 			if apierrors.IsNotFound(err) {
+				if certificate.External {
+					return errors.WithMessage(err, "external certificate not found")
+				}
 				continue
 			}
 			return errors.WithStack(err)
@@ -194,8 +232,10 @@ func (c Certificates) EnsureAllExist() error {
 		if len(certificate.KeyPair.Cert) == 0 {
 			return errors.Wrapf(ErrMissingCrt, "for certificate: %s", certificate.Purpose)
 		}
-		if len(certificate.KeyPair.Key) == 0 {
-			return errors.Wrapf(ErrMissingKey, "for certificate: %s", certificate.Purpose)
+		if !certificate.External {
+			if len(certificate.KeyPair.Key) == 0 {
+				return errors.Wrapf(ErrMissingKey, "for certificate: %s", certificate.Purpose)
+			}
 		}
 	}
 	return nil
@@ -266,6 +306,7 @@ func (c Certificates) LookupOrGenerate(ctx context.Context, ctrlclient client.Cl
 // Certificate represents a single certificate CA.
 type Certificate struct {
 	Generated         bool
+	External          bool
 	Purpose           Purpose
 	KeyPair           *certs.KeyPair
 	CertFile, KeyFile string

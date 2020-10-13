@@ -18,15 +18,15 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
 	apicorev1 "k8s.io/api/core/v1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
-	"sigs.k8s.io/cluster-api/controllers/remote"
-	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,68 +34,69 @@ var (
 	ErrNodeNotFound = errors.New("cannot find node with matching ProviderID")
 )
 
-func (r *MachineReconciler) reconcileNodeRef(ctx context.Context, cluster *clusterv1.Cluster, machine *clusterv1.Machine) error {
-	logger := r.Log.WithValues("machine", machine.Name, "namespace", machine.Namespace)
+func (r *MachineReconciler) reconcileNodeRef(ctx context.Context, cluster *clusterv1.Cluster, machine *clusterv1.Machine) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx, "cluster", cluster.Name)
+
 	// Check that the Machine hasn't been deleted or in the process.
 	if !machine.DeletionTimestamp.IsZero() {
-		return nil
+		return ctrl.Result{}, nil
 	}
 
 	// Check that the Machine doesn't already have a NodeRef.
 	if machine.Status.NodeRef != nil {
-		return nil
+		return ctrl.Result{}, nil
 	}
 
-	logger = logger.WithValues("cluster", cluster.Name)
+	log = log.WithValues("cluster", cluster.Name)
 
 	// Check that the Machine has a valid ProviderID.
 	if machine.Spec.ProviderID == nil || *machine.Spec.ProviderID == "" {
-		logger.Info("Machine doesn't have a valid ProviderID yet")
-		return nil
+		log.Info("Machine doesn't have a valid ProviderID yet")
+		return ctrl.Result{}, nil
 	}
 
 	providerID, err := noderefutil.NewProviderID(*machine.Spec.ProviderID)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
-	clusterClient, err := remote.NewClusterClient(ctx, r.Client, util.ObjectKey(cluster), r.scheme)
+	remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	// Get the Node reference.
-	nodeRef, err := r.getNodeReference(clusterClient, providerID)
+	nodeRef, err := r.getNodeReference(ctx, remoteClient, providerID)
 	if err != nil {
 		if err == ErrNodeNotFound {
-			return errors.Wrapf(&capierrors.RequeueAfterError{RequeueAfter: 10 * time.Second},
-				"cannot assign NodeRef to Machine %q in namespace %q, no matching Node", machine.Name, machine.Namespace)
+			log.Info(fmt.Sprintf("Cannot assign NodeRef to Machine: %s, requeuing", ErrNodeNotFound.Error()))
+			return ctrl.Result{RequeueAfter: 20 * time.Second}, nil
 		}
-		logger.Error(err, "Failed to assign NodeRef")
+		log.Error(err, "Failed to assign NodeRef")
 		r.recorder.Event(machine, apicorev1.EventTypeWarning, "FailedSetNodeRef", err.Error())
-		return err
+		return ctrl.Result{}, err
 	}
 
 	// Set the Machine NodeRef.
 	machine.Status.NodeRef = nodeRef
-	logger.Info("Set Machine's NodeRef", "noderef", machine.Status.NodeRef.Name)
+	log.Info("Set Machine's NodeRef", "noderef", machine.Status.NodeRef.Name)
 	r.recorder.Event(machine, apicorev1.EventTypeNormal, "SuccessfulSetNodeRef", machine.Status.NodeRef.Name)
-	return nil
+	return ctrl.Result{}, nil
 }
 
-func (r *MachineReconciler) getNodeReference(c client.Client, providerID *noderefutil.ProviderID) (*apicorev1.ObjectReference, error) {
-	logger := r.Log.WithValues("providerID", providerID)
+func (r *MachineReconciler) getNodeReference(ctx context.Context, c client.Reader, providerID *noderefutil.ProviderID) (*apicorev1.ObjectReference, error) {
+	log := ctrl.LoggerFrom(ctx, "providerID", providerID)
 
 	nodeList := apicorev1.NodeList{}
 	for {
-		if err := c.List(context.TODO(), &nodeList, client.Continue(nodeList.Continue)); err != nil {
+		if err := c.List(ctx, &nodeList, client.Continue(nodeList.Continue)); err != nil {
 			return nil, err
 		}
 
 		for _, node := range nodeList.Items {
 			nodeProviderID, err := noderefutil.NewProviderID(node.Spec.ProviderID)
 			if err != nil {
-				logger.Error(err, "Failed to parse ProviderID", "node", node.Name)
+				log.Error(err, "Failed to parse ProviderID", "node", node.Name)
 				continue
 			}
 

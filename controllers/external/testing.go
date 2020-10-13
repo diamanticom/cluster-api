@@ -30,7 +30,7 @@ var (
 			Kind:       "CustomResourceDefinition",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "genericmachines.bootstrap.cluster.x-k8s.io",
+			Name: "bootstrapmachines.bootstrap.cluster.x-k8s.io",
 			Labels: map[string]string{
 				clusterv1.GroupVersion.String(): "v1alpha3",
 			},
@@ -40,7 +40,7 @@ var (
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Kind:   "BootstrapMachine",
-				Plural: "genericmachines",
+				Plural: "bootstrapmachines",
 			},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
@@ -55,6 +55,10 @@ var (
 							Type: "object",
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
+									Type:                   "object",
+									XPreserveUnknownFields: pointer.BoolPtr(true),
+								},
+								"status": {
 									Type:                   "object",
 									XPreserveUnknownFields: pointer.BoolPtr(true),
 								},
@@ -72,7 +76,7 @@ var (
 			Kind:       "CustomResourceDefinition",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "genericmachinetemplates.bootstrap.cluster.x-k8s.io",
+			Name: "bootstrapmachinetemplates.bootstrap.cluster.x-k8s.io",
 			Labels: map[string]string{
 				clusterv1.GroupVersion.String(): "v1alpha3",
 			},
@@ -82,7 +86,7 @@ var (
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Kind:   "BootstrapMachineTemplate",
-				Plural: "genericmachinetemplates",
+				Plural: "bootstrapmachinetemplates",
 			},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
@@ -97,6 +101,10 @@ var (
 							Type: "object",
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
+									Type:                   "object",
+									XPreserveUnknownFields: pointer.BoolPtr(true),
+								},
+								"status": {
 									Type:                   "object",
 									XPreserveUnknownFields: pointer.BoolPtr(true),
 								},
@@ -114,7 +122,7 @@ var (
 			Kind:       "CustomResourceDefinition",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "genericmachines.infrastructure.cluster.x-k8s.io",
+			Name: "infrastructuremachines.infrastructure.cluster.x-k8s.io",
 			Labels: map[string]string{
 				clusterv1.GroupVersion.String(): "v1alpha3",
 			},
@@ -124,7 +132,7 @@ var (
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Kind:   "InfrastructureMachine",
-				Plural: "genericmachines",
+				Plural: "infrastructuremachines",
 			},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
@@ -142,6 +150,10 @@ var (
 									Type:                   "object",
 									XPreserveUnknownFields: pointer.BoolPtr(true),
 								},
+								"status": {
+									Type:                   "object",
+									XPreserveUnknownFields: pointer.BoolPtr(true),
+								},
 							},
 						},
 					},
@@ -156,7 +168,7 @@ var (
 			Kind:       "CustomResourceDefinition",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "genericmachinetemplates.infrastructure.cluster.x-k8s.io",
+			Name: "infrastructuremachinetemplates.infrastructure.cluster.x-k8s.io",
 			Labels: map[string]string{
 				clusterv1.GroupVersion.String(): "v1alpha3",
 			},
@@ -166,7 +178,7 @@ var (
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Kind:   "InfrastructureMachineTemplate",
-				Plural: "genericmachinetemplates",
+				Plural: "infrastructuremachinetemplates",
 			},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
@@ -181,6 +193,10 @@ var (
 							Type: "object",
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
+									Type:                   "object",
+									XPreserveUnknownFields: pointer.BoolPtr(true),
+								},
+								"status": {
 									Type:                   "object",
 									XPreserveUnknownFields: pointer.BoolPtr(true),
 								},

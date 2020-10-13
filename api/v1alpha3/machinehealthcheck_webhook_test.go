@@ -105,11 +105,21 @@ func TestMachineHealthCheckClusterNameImmutable(t *testing.T) {
 			newMHC := &MachineHealthCheck{
 				Spec: MachineHealthCheckSpec{
 					ClusterName: tt.newClusterName,
+					Selector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test": "test",
+						},
+					},
 				},
 			}
 			oldMHC := &MachineHealthCheck{
 				Spec: MachineHealthCheckSpec{
 					ClusterName: tt.oldClusterName,
+					Selector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"test": "test",
+						},
+					},
 				},
 			}
 
@@ -172,6 +182,11 @@ func TestMachineHealthCheckNodeStartupTimeout(t *testing.T) {
 		mhc := &MachineHealthCheck{
 			Spec: MachineHealthCheckSpec{
 				NodeStartupTimeout: tt.timeout,
+				Selector: metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"test": "test",
+					},
+				},
 			},
 		}
 
@@ -220,6 +235,11 @@ func TestMachineHealthCheckMaxUnhealthy(t *testing.T) {
 		mhc := &MachineHealthCheck{
 			Spec: MachineHealthCheckSpec{
 				MaxUnhealthy: &maxUnhealthy,
+				Selector: metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"test": "test",
+					},
+				},
 			},
 		}
 
@@ -231,4 +251,35 @@ func TestMachineHealthCheckMaxUnhealthy(t *testing.T) {
 			g.Expect(mhc.ValidateUpdate(mhc)).To(Succeed())
 		}
 	}
+}
+
+func TestMachineHealthCheckSelectorValidation(t *testing.T) {
+	g := NewWithT(t)
+	mhc := &MachineHealthCheck{}
+	err := mhc.validate(nil)
+	g.Expect(err).ToNot(BeNil())
+	g.Expect(err.Error()).To(ContainSubstring("selector must not be empty"))
+}
+
+func TestMachineHealthCheckClusterNameSelectorValidation(t *testing.T) {
+	g := NewWithT(t)
+	mhc := &MachineHealthCheck{
+		Spec: MachineHealthCheckSpec{
+			ClusterName: "foo",
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					ClusterLabelName: "bar",
+					"baz":            "qux",
+				},
+			},
+		},
+	}
+	err := mhc.validate(nil)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("cannot specify a cluster selector other than the one specified by ClusterName"))
+
+	mhc.Spec.Selector.MatchLabels[ClusterLabelName] = "foo"
+	g.Expect(mhc.validate(nil)).To(Succeed())
+	delete(mhc.Spec.Selector.MatchLabels, ClusterLabelName)
+	g.Expect(mhc.validate(nil)).To(Succeed())
 }

@@ -33,6 +33,7 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal/machinefilters"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 )
 
 // FilterableMachineCollection is a set of Machines
@@ -48,23 +49,28 @@ func NewFilterableMachineCollection(machines ...*clusterv1.Machine) FilterableMa
 // NewFilterableMachineCollectionFromMachineList creates a FilterableMachineCollection from the given MachineList
 func NewFilterableMachineCollectionFromMachineList(machineList *clusterv1.MachineList) FilterableMachineCollection {
 	ss := make(FilterableMachineCollection, len(machineList.Items))
-	if machineList != nil {
-		for i := range machineList.Items {
-			ss.Insert(&machineList.Items[i])
-		}
+	for i := range machineList.Items {
+		ss.Insert(&machineList.Items[i])
 	}
 	return ss
 }
 
 // Insert adds items to the set.
-func (s FilterableMachineCollection) Insert(machines ...*clusterv1.Machine) FilterableMachineCollection {
+func (s FilterableMachineCollection) Insert(machines ...*clusterv1.Machine) {
 	for i := range machines {
 		if machines[i] != nil {
 			m := machines[i]
 			s[m.Name] = m
 		}
 	}
-	return s
+}
+
+// Difference returns a copy without machines that are in the given collection
+func (s FilterableMachineCollection) Difference(machines FilterableMachineCollection) FilterableMachineCollection {
+	return s.Filter(func(m *clusterv1.Machine) bool {
+		_, found := machines[m.Name]
+		return !found
+	})
 }
 
 // SortedByCreationTimestamp returns the machines sorted by creation timestamp
@@ -135,4 +141,24 @@ func (s FilterableMachineCollection) DeepCopy() FilterableMachineCollection {
 		result.Insert(m.DeepCopy())
 	}
 	return result
+}
+
+// ConditionGetters returns the slice with machines converted into conditions.Getter.
+func (s FilterableMachineCollection) ConditionGetters() []conditions.Getter {
+	res := make([]conditions.Getter, 0, len(s))
+	for _, v := range s {
+		value := *v
+		res = append(res, &value)
+	}
+	return res
+}
+
+// Names returns a slice of the names of each machine in the collection.
+// Useful for logging and test assertions.
+func (s FilterableMachineCollection) Names() []string {
+	names := make([]string, 0, s.Len())
+	for _, m := range s {
+		names = append(names, m.Name)
+	}
+	return names
 }

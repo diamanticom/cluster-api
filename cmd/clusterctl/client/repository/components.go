@@ -18,8 +18,6 @@ package repository
 
 import (
 	"fmt"
-	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -27,12 +25,13 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/util/sets"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
+	yaml "sigs.k8s.io/cluster-api/cmd/clusterctl/client/yamlprocessor"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/scheme"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/util"
+	utilyaml "sigs.k8s.io/cluster-api/util/yaml"
 )
 
 const (
@@ -50,9 +49,6 @@ const (
 	controllerContainerName = "manager"
 	namespaceArgPrefix      = "--namespace="
 )
-
-// variableRegEx defines the regexp used for searching variables inside a YAML
-var variableRegEx = regexp.MustCompile(`\${\s*([A-Z0-9_]+)\s*}`)
 
 // Components wraps a YAML file that defines the provider components
 // to be installed in a management cluster (CRD, Controller, RBAC etc.)
@@ -171,43 +167,68 @@ func (c *components) Yaml() ([]byte, error) {
 	objs = append(objs, c.sharedObjs...)
 	objs = append(objs, c.instanceObjs...)
 
-	return util.FromUnstructured(objs)
+	return utilyaml.FromUnstructured(objs)
 }
 
-// newComponents returns a new objects embedding a component YAML file
+// ComponentsOptions represents specific inputs that are passed in to
+// clusterctl library. These are user specified inputs.
+type ComponentsOptions struct {
+	Version           string
+	TargetNamespace   string
+	WatchingNamespace string
+	// Allows for skipping variable replacement in the component YAML
+	SkipVariables bool
+}
+
+// ComponentsInput represents all the inputs required by NewComponents
+type ComponentsInput struct {
+	Provider     config.Provider
+	ConfigClient config.Client
+	Processor    yaml.Processor
+	RawYaml      []byte
+	Options      ComponentsOptions
+}
+
+// NewComponents returns a new objects embedding a component YAML file
 //
 // It is important to notice that clusterctl applies a set of processing steps to the “raw” component YAML read
 // from the provider repositories:
 // 1. Checks for all the variables in the component YAML file and replace with corresponding config values
-// 2. Ensure all the provider components are deployed in the target namespace (apply only to namespaced objects)
-// 3. Ensure all the ClusterRoleBinding which are referencing namespaced objects have the name prefixed with the namespace name
-// 4. Set the watching namespace for the provider controller
-// 5. Adds labels to all the components in order to allow easy identification of the provider objects
-func NewComponents(provider config.Provider, version string, rawyaml []byte, configClient config.Client, targetNamespace, watchingNamespace string) (*components, error) {
-	// inspect the yaml read from the repository for variables
-	variables := inspectVariables(rawyaml)
+// 2. The variables replacement can be skipped using the SkipVariables flag in the input options
+// 3. Ensure all the provider components are deployed in the target namespace (apply only to namespaced objects)
+// 4. Ensure all the ClusterRoleBinding which are referencing namespaced objects have the name prefixed with the namespace name
+// 5. Set the watching namespace for the provider controller
+// 6. Adds labels to all the components in order to allow easy identification of the provider objects
+func NewComponents(input ComponentsInput) (*components, error) {
 
-	// Replace variables with corresponding values read from the config
-	yaml, err := replaceVariables(rawyaml, variables, configClient.Variables())
+	variables, err := input.Processor.GetVariables(input.RawYaml)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to perform variable substitution")
+		return nil, err
 	}
 
-	// transform the yaml in a list of objects, so following transformation can work on typed objects (instead of working on a string/slice of bytes)
-	objs, err := util.ToUnstructured(yaml)
+	processedYaml := input.RawYaml
+	if !input.Options.SkipVariables {
+		processedYaml, err = input.Processor.Process(input.RawYaml, input.ConfigClient.Variables().Get)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to perform variable substitution")
+		}
+	}
+
+	// Transform the yaml in a list of objects, so following transformation can work on typed objects (instead of working on a string/slice of bytes)
+	objs, err := utilyaml.ToUnstructured(processedYaml)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse yaml")
 	}
 
-	// apply image overrides, if defined
+	// Apply image overrides, if defined
 	objs, err = util.FixImages(objs, func(image string) (string, error) {
-		return configClient.ImageMeta().AlterImage(provider.ManifestLabel(), image)
+		return input.ConfigClient.ImageMeta().AlterImage(input.Provider.ManifestLabel(), image)
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to apply image overrides")
 	}
 
-	// inspect the list of objects for the images required by the provider component
+	// Inspect the list of objects for the images required by the provider component.
 	images, err := util.InspectImages(objs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to detect required images")
@@ -232,24 +253,24 @@ func NewComponents(provider config.Provider, version string, rawyaml []byte, con
 	// if targetNamespace is not specified, then defaultTargetNamespace is used. In case both targetNamespace and defaultTargetNamespace
 	// are empty, an error is returned
 
-	if targetNamespace == "" {
-		targetNamespace = defaultTargetNamespace
+	if input.Options.TargetNamespace == "" {
+		input.Options.TargetNamespace = defaultTargetNamespace
 	}
 
-	if targetNamespace == "" {
+	if input.Options.TargetNamespace == "" {
 		return nil, errors.New("target namespace can't be defaulted. Please specify a target namespace")
 	}
 
 	// add a Namespace object if missing (ensure the targetNamespace will be created)
-	instanceObjs = addNamespaceIfMissing(instanceObjs, targetNamespace)
+	instanceObjs = addNamespaceIfMissing(instanceObjs, input.Options.TargetNamespace)
 
 	// fix Namespace name in all the objects
-	instanceObjs = fixTargetNamespace(instanceObjs, targetNamespace)
+	instanceObjs = fixTargetNamespace(instanceObjs, input.Options.TargetNamespace)
 
 	// ensures all the ClusterRole and ClusterRoleBinding have the name prefixed with the namespace name and that
 	// all the clusterRole/clusterRoleBinding namespaced subjects refers to targetNamespace
 	// Nb. Making all the RBAC rules "namespaced" is required for supporting multi-tenancy
-	instanceObjs, err = fixRBAC(instanceObjs, targetNamespace)
+	instanceObjs, err = fixRBAC(instanceObjs, input.Options.TargetNamespace)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to fix ClusterRoleBinding names")
 	}
@@ -262,16 +283,16 @@ func NewComponents(provider config.Provider, version string, rawyaml []byte, con
 	}
 
 	// if the requested watchingNamespace is different from the defaultWatchingNamespace, fix it
-	if defaultWatchingNamespace != watchingNamespace {
-		instanceObjs, err = fixWatchNamespace(instanceObjs, watchingNamespace)
+	if defaultWatchingNamespace != input.Options.WatchingNamespace {
+		instanceObjs, err = fixWatchNamespace(instanceObjs, input.Options.WatchingNamespace)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to set watching namespace")
 		}
 	}
 
 	// Add common labels to both the obj groups.
-	instanceObjs = addCommonLabels(instanceObjs, provider)
-	sharedObjs = addCommonLabels(sharedObjs, provider)
+	instanceObjs = addCommonLabels(instanceObjs, input.Provider)
+	sharedObjs = addCommonLabels(sharedObjs, input.Provider)
 
 	// Add an identifying label to shared components so next invocation of init, clusterctl delete and clusterctl upgrade can act accordingly.
 	// Additionally, the capi-webhook-system namespace gets detached from any provider, so we prevent that deleting
@@ -279,12 +300,12 @@ func NewComponents(provider config.Provider, version string, rawyaml []byte, con
 	sharedObjs = fixSharedLabels(sharedObjs)
 
 	return &components{
-		Provider:          provider,
-		version:           version,
+		Provider:          input.Provider,
+		version:           input.Options.Version,
 		variables:         variables,
 		images:            images,
-		targetNamespace:   targetNamespace,
-		watchingNamespace: watchingNamespace,
+		targetNamespace:   input.Options.TargetNamespace,
+		watchingNamespace: input.Options.WatchingNamespace,
 		instanceObjs:      instanceObjs,
 		sharedObjs:        sharedObjs,
 	}, nil
@@ -320,41 +341,6 @@ func splitInstanceAndSharedResources(objs []unstructured.Unstructured) (instance
 		instanceObjs = append(instanceObjs, o)
 	}
 	return
-}
-
-func inspectVariables(data []byte) []string {
-	variables := sets.NewString()
-	match := variableRegEx.FindAllStringSubmatch(string(data), -1)
-
-	for _, m := range match {
-		submatch := m[1]
-		if !variables.Has(submatch) {
-			variables.Insert(submatch)
-		}
-	}
-
-	ret := variables.List()
-	sort.Strings(ret)
-	return ret
-}
-
-func replaceVariables(yaml []byte, variables []string, configVariablesClient config.VariablesClient) ([]byte, error) {
-	tmp := string(yaml)
-	var missingVariables []string
-	for _, key := range variables {
-		val, err := configVariablesClient.Get(key)
-		if err != nil {
-			missingVariables = append(missingVariables, key)
-			continue
-		}
-		exp := regexp.MustCompile(`\$\{\s*` + key + `\s*\}`)
-		tmp = exp.ReplaceAllString(tmp, val)
-	}
-	if len(missingVariables) > 0 {
-		return nil, errors.Errorf("value for variables [%s] is not set. Please set the value using os environment variables or the clusterctl config file", strings.Join(missingVariables, ", "))
-	}
-
-	return []byte(tmp), nil
 }
 
 // inspectTargetNamespace identifies the name of the namespace object contained in the components YAML, if any.
@@ -445,9 +431,11 @@ func fixRBAC(objs []unstructured.Unstructured, targetNamespace string) ([]unstru
 			// assign a namespaced name
 			b.Name = fmt.Sprintf("%s-%s", targetNamespace, b.Name)
 
-			// ensure that namespaced subjects refers to targetNamespace
+			// ensure that namespaced subjects refers to targetNamespace; the only exception
+			// for this rule are the namespaced subjects located in the capi-webhook-system, which are
+			// not affected by the targetNamespace value
 			for k := range b.Subjects {
-				if b.Subjects[k].Namespace != "" {
+				if b.Subjects[k].Namespace != "" && b.Subjects[k].Namespace != WebhookNamespaceName {
 					b.Subjects[k].Namespace = targetNamespace
 				}
 			}
@@ -470,9 +458,11 @@ func fixRBAC(objs []unstructured.Unstructured, targetNamespace string) ([]unstru
 				return nil, err
 			}
 
-			// ensure that namespaced subjects refers to targetNamespace
+			// ensure that namespaced subjects refers to targetNamespace; the only exception
+			// for this rule are the namespaced subjects located in the capi-webhook-system, which are
+			// not affected by the targetNamespace value
 			for k := range b.Subjects {
-				if b.Subjects[k].Namespace != "" {
+				if b.Subjects[k].Namespace != "" && b.Subjects[k].Namespace != WebhookNamespaceName {
 					b.Subjects[k].Namespace = targetNamespace
 				}
 			}

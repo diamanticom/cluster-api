@@ -17,7 +17,6 @@ limitations under the License.
 package client
 
 import (
-	"context"
 	"sort"
 	"testing"
 
@@ -29,6 +28,119 @@ import (
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 )
+
+func Test_clusterctlClient_PlanCertUpgrade(t *testing.T) {
+	// create a fake config with a provider named P1 and a variable named var
+	repository1Config := config.NewProvider("p1", "url", clusterctlv1.CoreProviderType)
+
+	config1 := newFakeConfig().
+		WithVar("var", "value").
+		WithProvider(repository1Config)
+
+	// create a fake repository with some YAML files in it (usually matching
+	// the list of providers defined in the config)
+	repository1 := newFakeRepository(repository1Config, config1).
+		WithPaths("root", "components").
+		WithDefaultVersion("v1.0").
+		WithFile("v1.0", "components.yaml", []byte("content"))
+
+	certManagerPlan := CertManagerUpgradePlan{
+		From:          "v0.16.0",
+		To:            "v0.16.1",
+		ShouldUpgrade: true,
+	}
+	// create a fake cluster, with a cert manager client that has an upgrade
+	// plan
+	cluster1 := newFakeCluster(cluster.Kubeconfig{Path: "cluster1"}, config1).
+		WithCertManagerClient(newFakeCertManagerClient(nil, nil).WithCertManagerPlan(certManagerPlan))
+
+	client := newFakeClient(config1).
+		WithRepository(repository1).
+		WithCluster(cluster1)
+
+	tests := []struct {
+		name      string
+		client    *fakeClient
+		expectErr bool
+	}{
+		{
+			name:      "returns plan for upgrading cert-manager",
+			client:    client,
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			options := PlanUpgradeOptions{
+				Kubeconfig: Kubeconfig{Path: "cluster1"},
+			}
+			actualPlan, err := tt.client.PlanCertManagerUpgrade(options)
+			if tt.expectErr {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(actualPlan).To(Equal(CertManagerUpgradePlan{}))
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(actualPlan).To(Equal(certManagerPlan))
+		})
+	}
+
+}
+
+func Test_clusterctlClient_PlanUpgrade(t *testing.T) {
+	type fields struct {
+		client *fakeClient
+	}
+	type args struct {
+		options PlanUpgradeOptions
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		wantErr bool
+	}{
+		{
+			name: "does not return error if cluster client is found",
+			fields: fields{
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+			},
+			args: args{
+				options: PlanUpgradeOptions{
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "returns an error if cluster client is not found",
+			fields: fields{
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+			},
+			args: args{
+				options: PlanUpgradeOptions{
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "some-other-context"},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			_, err := tt.fields.client.PlanUpgrade(tt.args.options)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+		})
+	}
+}
 
 func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 	type fields struct {
@@ -47,11 +159,11 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 		{
 			name: "apply a plan",
 			fields: fields{
-				client: fakeClientFoUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
 			},
 			args: args{
 				options: ApplyUpgradeOptions{
-					Kubeconfig:              "kubeconfig",
+					Kubeconfig:              Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ManagementGroup:         "cluster-api-system/cluster-api",
 					Contract:                "v1alpha3",
 					CoreProvider:            "",
@@ -76,11 +188,11 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 		{
 			name: "apply a custom plan - core provider only",
 			fields: fields{
-				client: fakeClientFoUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
 			},
 			args: args{
 				options: ApplyUpgradeOptions{
-					Kubeconfig:              "kubeconfig",
+					Kubeconfig:              Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ManagementGroup:         "cluster-api-system/cluster-api",
 					Contract:                "",
 					CoreProvider:            "cluster-api-system/cluster-api:v1.0.1",
@@ -105,11 +217,11 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 		{
 			name: "apply a custom plan - infra provider only",
 			fields: fields{
-				client: fakeClientFoUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
 			},
 			args: args{
 				options: ApplyUpgradeOptions{
-					Kubeconfig:              "kubeconfig",
+					Kubeconfig:              Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ManagementGroup:         "cluster-api-system/cluster-api",
 					Contract:                "",
 					CoreProvider:            "",
@@ -134,11 +246,11 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 		{
 			name: "apply a custom plan - both providers",
 			fields: fields{
-				client: fakeClientFoUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
+				client: fakeClientForUpgrade(), // core v1.0.0 (v1.0.1 available), infra v2.0.0 (v2.0.1 available)
 			},
 			args: args{
 				options: ApplyUpgradeOptions{
-					Kubeconfig:              "kubeconfig",
+					Kubeconfig:              Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ManagementGroup:         "cluster-api-system/cluster-api",
 					Contract:                "",
 					CoreProvider:            "cluster-api-system/cluster-api:v1.0.1",
@@ -153,7 +265,7 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 					Kind:       "ProviderList",
 				},
 				ListMeta: metav1.ListMeta{},
-				Items: []clusterctlv1.Provider{ // only one provider should be upgraded
+				Items: []clusterctlv1.Provider{
 					fakeProvider("cluster-api", clusterctlv1.CoreProviderType, "v1.0.1", "cluster-api-system"),
 					fakeProvider("infra", clusterctlv1.InfrastructureProviderType, "v2.0.1", "infra-system"),
 				},
@@ -172,13 +284,15 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 			}
 			g.Expect(err).NotTo(HaveOccurred())
 
-			proxy := tt.fields.client.clusters["kubeconfig"].Proxy()
+			// converting between client and cluster alias for Kubeconfig
+			input := cluster.Kubeconfig(tt.args.options.Kubeconfig)
+			proxy := tt.fields.client.clusters[input].Proxy()
 			gotProviders := &clusterctlv1.ProviderList{}
 
 			c, err := proxy.NewClient()
 			g.Expect(err).NotTo(HaveOccurred())
 
-			g.Expect(c.List(context.Background(), gotProviders)).To(Succeed())
+			g.Expect(c.List(ctx, gotProviders)).To(Succeed())
 
 			sort.Slice(gotProviders.Items, func(i, j int) bool {
 				return gotProviders.Items[i].Name < gotProviders.Items[j].Name
@@ -194,7 +308,7 @@ func Test_clusterctlClient_ApplyUpgrade(t *testing.T) {
 	}
 }
 
-func fakeClientFoUpgrade() *fakeClient {
+func fakeClientForUpgrade() *fakeClient {
 	core := config.NewProvider("cluster-api", "https://somewhere.com", clusterctlv1.CoreProviderType)
 	infra := config.NewProvider("infra", "https://somewhere.com", clusterctlv1.InfrastructureProviderType)
 
@@ -223,11 +337,11 @@ func fakeClientFoUpgrade() *fakeClient {
 			},
 		})
 
-	cluster1 := newFakeCluster("kubeconfig", config1).
+	cluster1 := newFakeCluster(cluster.Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"}, config1).
 		WithRepository(repository1).
 		WithRepository(repository2).
-		WithProviderInventory(core.Name(), core.Type(), "v1.0.0", "cluster-api-system", "").
-		WithProviderInventory(infra.Name(), infra.Type(), "v2.0.0", "infra-system", "")
+		WithProviderInventory(core.Name(), core.Type(), "v1.0.0", "cluster-api-system", "watchingNS").
+		WithProviderInventory(infra.Name(), infra.Type(), "v2.0.0", "infra-system", "watchingNS")
 
 	client := newFakeClient(config1).
 		WithRepository(repository1).
@@ -255,7 +369,7 @@ func fakeProvider(name string, providerType clusterctlv1.ProviderType, version, 
 		ProviderName:     name,
 		Type:             string(providerType),
 		Version:          version,
-		WatchedNamespace: "",
+		WatchedNamespace: "watchingNS",
 	}
 }
 

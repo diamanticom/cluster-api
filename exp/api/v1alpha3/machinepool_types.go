@@ -59,6 +59,9 @@ type MachinePoolSpec struct {
 	// This field must match the provider IDs as seen on the node objects corresponding to a machine pool's machine instances.
 	// +optional
 	ProviderIDList []string `json:"providerIDList,omitempty"`
+
+	// FailureDomains is the list of failure domains this MachinePool should be attached to.
+	FailureDomains []string `json:"failureDomains,omitempty"`
 }
 
 // ANCHOR_END: MachinePoolSpec
@@ -113,6 +116,14 @@ type MachinePoolStatus struct {
 	// InfrastructureReady is the state of the infrastructure provider.
 	// +optional
 	InfrastructureReady bool `json:"infrastructureReady"`
+
+	// ObservedGeneration is the latest generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions define the current service state of the MachinePool.
+	// +optional
+	Conditions clusterv1.Conditions `json:"conditions,omitempty"`
 }
 
 // ANCHOR_END: MachinePoolStatus
@@ -146,6 +157,14 @@ const (
 	// have become Kubernetes Nodes in the Ready state.
 	MachinePoolPhaseRunning = MachinePoolPhase("Running")
 
+	// MachinePoolPhaseScalingUp is the MachinePool state when the
+	// MachinePool infrastructure is scaling up.
+	MachinePoolPhaseScalingUp = MachinePoolPhase("ScalingUp")
+
+	// MachinePoolPhaseScalingDown is the MachinePool state when the
+	// MachinePool infrastructure is scaling down.
+	MachinePoolPhaseScalingDown = MachinePoolPhase("ScalingDown")
+
 	// MachinePoolPhaseDeleting is the MachinePool state when a delete
 	// request has been sent to the API Server,
 	// but its infrastructure has not yet been fully deleted.
@@ -173,6 +192,8 @@ func (m *MachinePoolStatus) GetTypedPhase() MachinePoolPhase {
 		MachinePoolPhaseProvisioning,
 		MachinePoolPhaseProvisioned,
 		MachinePoolPhaseRunning,
+		MachinePoolPhaseScalingUp,
+		MachinePoolPhaseScalingDown,
 		MachinePoolPhaseDeleting,
 		MachinePoolPhaseFailed:
 		return phase
@@ -184,8 +205,11 @@ func (m *MachinePoolStatus) GetTypedPhase() MachinePoolPhase {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:path=machinepools,shortName=mp,scope=Namespaced,categories=cluster-api
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 // +kubebuilder:storageversion
+// +kubebuilder:printcolumn:name="Replicas",type="string",JSONPath=".status.replicas",description="MachinePool replicas count"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="MachinePool status such as Terminating/Pending/Provisioning/Running/Failed etc"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.template.spec.version",description="Kubernetes version associated with this MachinePool"
 // +k8s:conversion-gen=false
 
 // MachinePool is the Schema for the machinepools API
@@ -195,6 +219,14 @@ type MachinePool struct {
 
 	Spec   MachinePoolSpec   `json:"spec,omitempty"`
 	Status MachinePoolStatus `json:"status,omitempty"`
+}
+
+func (m *MachinePool) GetConditions() clusterv1.Conditions {
+	return m.Status.Conditions
+}
+
+func (m *MachinePool) SetConditions(conditions clusterv1.Conditions) {
+	m.Status.Conditions = conditions
 }
 
 // +kubebuilder:object:root=true

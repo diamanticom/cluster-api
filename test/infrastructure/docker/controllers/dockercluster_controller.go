@@ -26,17 +26,14 @@ import (
 	infrav1 "sigs.k8s.io/cluster-api/test/infrastructure/docker/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/test/infrastructure/docker/docker"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-)
-
-const (
-	clusterControllerName = "DockerCluster-controller"
 )
 
 // DockerClusterReconciler reconciles a DockerCluster object
@@ -50,9 +47,8 @@ type DockerClusterReconciler struct {
 
 // Reconcile reads that state of the cluster for a DockerCluster object and makes changes based on the state read
 // and what is in the DockerCluster.Spec
-func (r *DockerClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, rerr error) {
-	ctx := context.Background()
-	log := log.Log.WithName(clusterControllerName).WithValues("docker-cluster", req.NamespacedName)
+func (r *DockerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, rerr error) {
+	log := ctrl.LoggerFrom(ctx)
 
 	// Fetch the DockerCluster instance
 	dockerCluster := &infrav1.DockerCluster{}
@@ -82,13 +78,13 @@ func (r *DockerClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, re
 	}
 
 	// Initialize the patch helper
-	patchHelper, err := patch.NewHelper(dockerCluster, r)
+	patchHelper, err := patch.NewHelper(dockerCluster, r.Client)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	// Always attempt to Patch the DockerCluster object and status after each reconciliation.
 	defer func() {
-		if err := patchHelper.Patch(ctx, dockerCluster); err != nil {
+		if err := patchDockerCluster(ctx, patchHelper, dockerCluster); err != nil {
 			log.Error(err, "failed to patch DockerCluster")
 			if rerr == nil {
 				rerr = err
@@ -101,27 +97,53 @@ func (r *DockerClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, re
 	// In the case of Docker, failure domains don't mean much so we simply copy the Spec into the Status.
 	dockerCluster.Status.FailureDomains = dockerCluster.Spec.FailureDomains
 
+	// Add finalizer first if not exist to avoid the race condition between init and delete
+	if !controllerutil.ContainsFinalizer(dockerCluster, infrav1.ClusterFinalizer) {
+		controllerutil.AddFinalizer(dockerCluster, infrav1.ClusterFinalizer)
+		return ctrl.Result{}, nil
+	}
+
 	// Handle deleted clusters
 	if !dockerCluster.DeletionTimestamp.IsZero() {
-		return reconcileDelete(ctx, dockerCluster, externalLoadBalancer)
+		return r.reconcileDelete(ctx, dockerCluster, externalLoadBalancer)
 	}
 
 	// Handle non-deleted clusters
-	return reconcileNormal(ctx, dockerCluster, externalLoadBalancer)
+	return r.reconcileNormal(ctx, dockerCluster, externalLoadBalancer)
 }
 
-func reconcileNormal(ctx context.Context, dockerCluster *infrav1.DockerCluster, externalLoadBalancer *docker.LoadBalancer) (ctrl.Result, error) {
-	// If the DockerCluster doesn't have finalizer, add it.
-	controllerutil.AddFinalizer(dockerCluster, infrav1.ClusterFinalizer)
+func patchDockerCluster(ctx context.Context, patchHelper *patch.Helper, dockerCluster *infrav1.DockerCluster) error {
+	// Always update the readyCondition by summarizing the state of other conditions.
+	// A step counter is added to represent progress during the provisioning process (instead we are hiding it during the deletion process).
+	conditions.SetSummary(dockerCluster,
+		conditions.WithConditions(
+			infrav1.LoadBalancerAvailableCondition,
+		),
+		conditions.WithStepCounterIf(dockerCluster.ObjectMeta.DeletionTimestamp.IsZero()),
+	)
 
+	// Patch the object, ignoring conflicts on the conditions owned by this controller.
+	return patchHelper.Patch(
+		ctx,
+		dockerCluster,
+		patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
+			clusterv1.ReadyCondition,
+			infrav1.LoadBalancerAvailableCondition,
+		}},
+	)
+}
+
+func (r *DockerClusterReconciler) reconcileNormal(ctx context.Context, dockerCluster *infrav1.DockerCluster, externalLoadBalancer *docker.LoadBalancer) (ctrl.Result, error) {
 	//Create the docker container hosting the load balancer
 	if err := externalLoadBalancer.Create(); err != nil {
+		conditions.MarkFalse(dockerCluster, infrav1.LoadBalancerAvailableCondition, infrav1.LoadBalancerProvisioningFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
 		return ctrl.Result{}, errors.Wrap(err, "failed to create load balancer")
 	}
 
 	// Set APIEndpoints with the load balancer IP so the Cluster API Cluster Controller can pull it
 	lbip4, err := externalLoadBalancer.IP(ctx)
 	if err != nil {
+		conditions.MarkFalse(dockerCluster, infrav1.LoadBalancerAvailableCondition, infrav1.LoadBalancerProvisioningFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
 		return ctrl.Result{}, errors.Wrap(err, "failed to get ip for the load balancer")
 	}
 
@@ -132,11 +154,25 @@ func reconcileNormal(ctx context.Context, dockerCluster *infrav1.DockerCluster, 
 
 	// Mark the dockerCluster ready
 	dockerCluster.Status.Ready = true
+	conditions.MarkTrue(dockerCluster, infrav1.LoadBalancerAvailableCondition)
 
 	return ctrl.Result{}, nil
 }
 
-func reconcileDelete(ctx context.Context, dockerCluster *infrav1.DockerCluster, externalLoadBalancer *docker.LoadBalancer) (ctrl.Result, error) {
+func (r *DockerClusterReconciler) reconcileDelete(ctx context.Context, dockerCluster *infrav1.DockerCluster, externalLoadBalancer *docker.LoadBalancer) (ctrl.Result, error) {
+	// Set the LoadBalancerAvailableCondition reporting delete is started, and issue a patch in order to make
+	// this visible to the users.
+	// NB. The operation in docker is fast, so there is the chance the user will not notice the status change;
+	// nevertheless we are issuing a patch so we can test a pattern that will be used by other providers as well
+	patchHelper, err := patch.NewHelper(dockerCluster, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	conditions.MarkFalse(dockerCluster, infrav1.LoadBalancerAvailableCondition, clusterv1.DeletingReason, clusterv1.ConditionSeverityInfo, "")
+	if err := patchDockerCluster(ctx, patchHelper, dockerCluster); err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to patch DockerCluster")
+	}
+
 	// Delete the docker container hosting the load balancer
 	if err := externalLoadBalancer.Delete(ctx); err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to delete load balancer")
@@ -150,13 +186,16 @@ func reconcileDelete(ctx context.Context, dockerCluster *infrav1.DockerCluster, 
 
 // SetupWithManager will add watches for this controller
 func (r *DockerClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	c, err := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1.DockerCluster{}).
-		Watches(
-			&source.Kind{Type: &clusterv1.Cluster{}},
-			&handler.EnqueueRequestsFromMapFunc{
-				ToRequests: util.ClusterToInfrastructureMapFunc(infrav1.GroupVersion.WithKind("DockerCluster")),
-			},
-		).
-		Complete(r)
+		WithEventFilter(predicates.ResourceNotPaused(r.Log)).
+		Build(r)
+	if err != nil {
+		return err
+	}
+	return c.Watch(
+		&source.Kind{Type: &clusterv1.Cluster{}},
+		handler.EnqueueRequestsFromMapFunc(util.ClusterToInfrastructureMapFunc(infrav1.GroupVersion.WithKind("DockerCluster"))),
+		predicates.ClusterUnpaused(r.Log),
+	)
 }

@@ -154,3 +154,32 @@ images:
 
 In this example we are overriding the image repository for all the components and the image tag for
 all the images in the cert-manager component.
+
+If required to alter only a specific image you can use:
+
+```yaml
+images:
+  all:
+    repository: myorg.io/local-repo
+  cert-manager/cert-manager-cainjector:
+    tag: v0.11.1
+```
+
+## Cert-Manager timeout override
+
+For situations when resources are limited or the network is slow, the cert-manager wait time to be running can be customized by adding a field to the clusterctl config file, for example:
+
+```yaml
+  cert-manager-timeout: 15m
+```
+
+The value string is a possibly signed sequence of decimal numbers, each with optional fraction and a unit suffix, such as "300ms", "-1.5h" or "2h45m". Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+
+If no value is specified or the format is invalid, the default value of 10 minutes will be used.
+
+
+## Debugging/Logging
+
+To have more verbose logs you can use the `-v` flag when running the `clusterctl` and set the level of the logging verbose with a positive integer number, ie. `-v 3`.
+
+If you do not want to use the flag every time you issue a command you can set the environment variable `CLUSTERCTL_LOG_LEVEL` or set the variable in the `clusterctl` config file which is located by default at `$HOME/.cluster-api/clusterctl.yaml`.

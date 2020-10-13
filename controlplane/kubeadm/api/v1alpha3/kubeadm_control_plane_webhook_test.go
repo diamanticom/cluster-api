@@ -38,11 +38,13 @@ func TestKubeadmControlPlaneDefault(t *testing.T) {
 		},
 		Spec: KubeadmControlPlaneSpec{
 			InfrastructureTemplate: corev1.ObjectReference{},
+			Version:                "1.18.3",
 		},
 	}
 	kcp.Default()
 
 	g.Expect(kcp.Spec.InfrastructureTemplate.Namespace).To(Equal(kcp.Namespace))
+	g.Expect(kcp.Spec.Version).To(Equal("v1.18.3"))
 }
 
 func TestKubeadmControlPlaneValidateCreate(t *testing.T) {
@@ -57,7 +59,7 @@ func TestKubeadmControlPlaneValidateCreate(t *testing.T) {
 				Name:      "infraTemplate",
 			},
 			Replicas: pointer.Int32Ptr(1),
-			Version:  "v1.16.6",
+			Version:  "v1.19.0",
 		},
 	}
 	invalidNamespace := valid.DeepCopy()
@@ -81,14 +83,14 @@ func TestKubeadmControlPlaneValidateCreate(t *testing.T) {
 		},
 	}
 
-	validVersion1 := valid.DeepCopy()
-	validVersion1.Spec.Version = "v1.16.6"
+	validVersion := valid.DeepCopy()
+	validVersion.Spec.Version = "v1.16.6"
 
-	validVersion2 := valid.DeepCopy()
-	validVersion2.Spec.Version = "1.16.6"
+	invalidVersion1 := valid.DeepCopy()
+	invalidVersion1.Spec.Version = "vv1.16.6"
 
-	invalidVersion := valid.DeepCopy()
-	invalidVersion.Spec.Version = "vv1.16.6"
+	invalidVersion2 := valid.DeepCopy()
+	invalidVersion2.Spec.Version = "1.16.6"
 
 	tests := []struct {
 		name      string
@@ -128,17 +130,17 @@ func TestKubeadmControlPlaneValidateCreate(t *testing.T) {
 		{
 			name:      "should succeed when given a valid semantic version with prepended 'v'",
 			expectErr: false,
-			kcp:       validVersion1,
+			kcp:       validVersion,
 		},
 		{
 			name:      "should succeed when given a valid semantic version without 'v'",
-			expectErr: false,
-			kcp:       validVersion2,
+			expectErr: true,
+			kcp:       invalidVersion2,
 		},
 		{
 			name:      "should return error when given an invalid semantic version",
 			expectErr: true,
-			kcp:       invalidVersion,
+			kcp:       invalidVersion1,
 		},
 	}
 
@@ -173,6 +175,9 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 						AdvertiseAddress: "127.0.0.1",
 						BindPort:         int32(443),
 					},
+					NodeRegistration: kubeadmv1beta1.NodeRegistrationOptions{
+						Name: "test",
+					},
 				},
 				ClusterConfiguration: &kubeadmv1beta1.ClusterConfiguration{
 					ClusterName: "test",
@@ -184,8 +189,24 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 					},
 				},
 				JoinConfiguration: &kubeadmv1beta1.JoinConfiguration{
+					Discovery: kubeadmv1beta1.Discovery{
+						Timeout: &metav1.Duration{
+							Duration: 10 * time.Minute,
+						},
+					},
 					NodeRegistration: kubeadmv1beta1.NodeRegistrationOptions{
 						Name: "test",
+					},
+				},
+				PreKubeadmCommands: []string{
+					"test", "foo",
+				},
+				PostKubeadmCommands: []string{
+					"test", "foo",
+				},
+				Files: []bootstrapv1.File{
+					{
+						Path: "test",
 					},
 				},
 			},
@@ -196,15 +217,31 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 	invalidUpdateKubeadmConfigInit := before.DeepCopy()
 	invalidUpdateKubeadmConfigInit.Spec.KubeadmConfigSpec.InitConfiguration = &kubeadmv1beta1.InitConfiguration{}
 
+	validUpdateKubeadmConfigInit := before.DeepCopy()
+	validUpdateKubeadmConfigInit.Spec.KubeadmConfigSpec.InitConfiguration.NodeRegistration = kubeadmv1beta1.NodeRegistrationOptions{}
+
 	invalidUpdateKubeadmConfigCluster := before.DeepCopy()
 	invalidUpdateKubeadmConfigCluster.Spec.KubeadmConfigSpec.ClusterConfiguration = &kubeadmv1beta1.ClusterConfiguration{}
 
+	invalidUpdateKubeadmConfigJoin := before.DeepCopy()
+	invalidUpdateKubeadmConfigJoin.Spec.KubeadmConfigSpec.JoinConfiguration = &kubeadmv1beta1.JoinConfiguration{}
+
 	validUpdateKubeadmConfigJoin := before.DeepCopy()
-	validUpdateKubeadmConfigJoin.Spec.KubeadmConfigSpec.JoinConfiguration = &kubeadmv1beta1.JoinConfiguration{}
+	validUpdateKubeadmConfigJoin.Spec.KubeadmConfigSpec.JoinConfiguration.NodeRegistration = kubeadmv1beta1.NodeRegistrationOptions{}
 
 	validUpdate := before.DeepCopy()
 	validUpdate.Labels = map[string]string{"blue": "green"}
-	validUpdate.Spec.Version = "v1.16.6"
+	validUpdate.Spec.KubeadmConfigSpec.PreKubeadmCommands = []string{"ab", "abc"}
+	validUpdate.Spec.KubeadmConfigSpec.PostKubeadmCommands = []string{"ab", "abc"}
+	validUpdate.Spec.KubeadmConfigSpec.Files = []bootstrapv1.File{
+		{
+			Path: "ab",
+		},
+		{
+			Path: "abc",
+		},
+	}
+	validUpdate.Spec.Version = "v1.17.1"
 	validUpdate.Spec.InfrastructureTemplate.Name = "orange"
 	validUpdate.Spec.Replicas = pointer.Int32Ptr(5)
 	now := metav1.NewTime(time.Now())
@@ -251,6 +288,14 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 
 	kubernetesVersion := before.DeepCopy()
 	kubernetesVersion.Spec.KubeadmConfigSpec.ClusterConfiguration.KubernetesVersion = "some kubernetes version"
+
+	prevKCPWithVersion := func(version string) *KubeadmControlPlane {
+		prev := before.DeepCopy()
+		prev.Spec.Version = version
+		return prev
+	}
+	skipMinorControlPlaneVersion := prevKCPWithVersion("v1.18.1")
+	emptyControlPlaneVersion := prevKCPWithVersion("")
 
 	controlPlaneEndpoint := before.DeepCopy()
 	controlPlaneEndpoint.Spec.KubeadmConfigSpec.ClusterConfiguration.ControlPlaneEndpoint = "some control plane endpoint"
@@ -388,6 +433,10 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 	withoutClusterConfiguration := before.DeepCopy()
 	withoutClusterConfiguration.Spec.KubeadmConfigSpec.ClusterConfiguration = nil
 
+	disallowedUpgrade118Prev := prevKCPWithVersion("v1.18.8")
+	disallowedUpgrade119Version := before.DeepCopy()
+	disallowedUpgrade119Version.Spec.Version = "v1.19.0"
+
 	tests := []struct {
 		name      string
 		expectErr bool
@@ -407,6 +456,12 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 			kcp:       invalidUpdateKubeadmConfigInit,
 		},
 		{
+			name:      "should not return an error when trying to mutate the kubeadmconfigspec initconfiguration noderegistration",
+			expectErr: false,
+			before:    before,
+			kcp:       validUpdateKubeadmConfigInit,
+		},
+		{
 			name:      "should return error when trying to mutate the kubeadmconfigspec clusterconfiguration",
 			expectErr: true,
 			before:    before,
@@ -415,6 +470,12 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 		{
 			name:      "should return error when trying to mutate the kubeadmconfigspec joinconfiguration",
 			expectErr: true,
+			before:    before,
+			kcp:       invalidUpdateKubeadmConfigJoin,
+		},
+		{
+			name:      "should not return an error when trying to mutate the kubeadmconfigspec joinconfiguration noderegistration",
+			expectErr: false,
 			before:    before,
 			kcp:       validUpdateKubeadmConfigJoin,
 		},
@@ -615,6 +676,30 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 			expectErr: false,
 			before:    withoutClusterConfiguration,
 			kcp:       withoutClusterConfiguration,
+		},
+		{
+			name:      "should fail when skipping control plane minor versions",
+			expectErr: true,
+			before:    before,
+			kcp:       skipMinorControlPlaneVersion,
+		},
+		{
+			name:      "should fail when no control plane version is passed",
+			expectErr: true,
+			before:    before,
+			kcp:       emptyControlPlaneVersion,
+		},
+		{
+			name:      "should pass if control plane version is the same",
+			expectErr: false,
+			before:    before,
+			kcp:       before.DeepCopy(),
+		},
+		{
+			name:      "should return error when trying to upgrade to v1.19.0",
+			expectErr: true,
+			before:    disallowedUpgrade118Prev,
+			kcp:       disallowedUpgrade119Version,
 		},
 	}
 

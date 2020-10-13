@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	fuzz "github.com/google/gofuzz"
 	"github.com/onsi/gomega"
 
@@ -35,9 +36,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/utils/diff"
+	"k8s.io/client-go/rest"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/util"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
@@ -54,35 +56,34 @@ var (
 // the Custom Resource Definition and looks which one is the stored version available.
 //
 // The object passed as input is modified in place if an updated compatible version is found.
-func ConvertReferenceAPIContract(ctx context.Context, c client.Client, ref *corev1.ObjectReference) error {
+func ConvertReferenceAPIContract(ctx context.Context, c client.Client, restConfig *rest.Config, ref *corev1.ObjectReference) error {
+	log := ctrl.LoggerFrom(ctx)
 	gvk := ref.GroupVersionKind()
-	crd, err := util.GetCRDWithContract(ctx, c, gvk, contract)
+
+	metadata, err := util.GetCRDMetadataFromGVK(ctx, restConfig, gvk)
 	if err != nil {
-		return err
+		log.Info("Cannot retrieve CRD with metadata only client, falling back to slower listing", "err", err.Error())
+		// Fallback to slower and more memory intensive method to get the full CRD.
+		crd, err := util.GetCRDWithContract(ctx, c, gvk, contract)
+		if err != nil {
+			return err
+		}
+		metadata = &metav1.PartialObjectMetadata{
+			TypeMeta:   crd.TypeMeta,
+			ObjectMeta: crd.ObjectMeta,
+		}
 	}
 
 	// If there is no label, return early without changing the reference.
-	supportedVersions, ok := crd.Labels[contract]
+	supportedVersions, ok := metadata.Labels[contract]
 	if !ok || supportedVersions == "" {
-		return errors.Errorf("cannot find any versions matching contract %q for CRD %v", contract, crd.Name)
+		return errors.Errorf("cannot find any versions matching contract %q for CRD %v", contract, metadata.Name)
 	}
 
 	// Pick the latest version in the slice and validate it.
 	kubeVersions := util.KubeAwareAPIVersions(strings.Split(supportedVersions, "_"))
 	sort.Sort(kubeVersions)
 	chosen := kubeVersions[len(kubeVersions)-1]
-
-	// Validate that the picked version is actually in the CRD spec.
-	found := false
-	for _, version := range crd.Spec.Versions {
-		if version.Name == chosen {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return errors.Errorf("cannot find any versions matching contract %q for CRD %v", contract, crd.Name)
-	}
 
 	// Modify the GroupVersionKind with the new version.
 	if gvk.Version != chosen {
@@ -159,7 +160,7 @@ func FuzzTestFunc(scheme *runtime.Scheme, hub conversion.Hub, dst conversion.Con
 			g.Expect(dstCopy.ConvertTo(after)).To(gomega.Succeed())
 
 			// Make sure that the hub before the conversions and after are the same, include a diff if not.
-			g.Expect(apiequality.Semantic.DeepEqual(hubCopy, after)).To(gomega.BeTrue(), diff.ObjectDiff(hubCopy, after))
+			g.Expect(apiequality.Semantic.DeepEqual(hubCopy, after)).To(gomega.BeTrue(), cmp.Diff(hubCopy, after))
 		}
 	}
 }

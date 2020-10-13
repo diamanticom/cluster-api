@@ -21,13 +21,17 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/pkg/errors"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 )
 
@@ -48,14 +52,23 @@ func Test_clusterctlClient_GetProvidersConfig(t *testing.T) {
 			field: field{
 				client: newFakeClient(newFakeConfig()),
 			},
+			// note: these will be sorted by name by the Providers() call, so be sure they are in alphabetical order here too
 			wantProviders: []string{
 				config.ClusterAPIProviderName,
+				config.AWSEKSBootstrapProviderName,
 				config.KubeadmBootstrapProviderName,
+				config.TalosBootstrapProviderName,
+				config.AWSEKSControlPlaneProviderName,
 				config.KubeadmControlPlaneProviderName,
+				config.TalosControlPlaneProviderName,
 				config.AWSProviderName,
 				config.AzureProviderName,
+				config.DOProviderName,
+				config.DockerProviderName,
 				config.Metal3ProviderName,
 				config.OpenStackProviderName,
+				config.PacketProviderName,
+				config.SideroProviderName,
 				config.VSphereProviderName,
 			},
 			wantErr: false,
@@ -65,15 +78,24 @@ func Test_clusterctlClient_GetProvidersConfig(t *testing.T) {
 			field: field{
 				client: newFakeClient(newFakeConfig().WithProvider(customProviderConfig)),
 			},
+			// note: these will be sorted by name by the Providers() call, so be sure they are in alphabetical order here too
 			wantProviders: []string{
 				config.ClusterAPIProviderName,
+				config.AWSEKSBootstrapProviderName,
 				customProviderConfig.Name(),
 				config.KubeadmBootstrapProviderName,
+				config.TalosBootstrapProviderName,
+				config.AWSEKSControlPlaneProviderName,
 				config.KubeadmControlPlaneProviderName,
+				config.TalosControlPlaneProviderName,
 				config.AWSProviderName,
 				config.AzureProviderName,
+				config.DOProviderName,
+				config.DockerProviderName,
 				config.Metal3ProviderName,
 				config.OpenStackProviderName,
+				config.PacketProviderName,
+				config.SideroProviderName,
 				config.VSphereProviderName,
 			},
 			wantErr: false,
@@ -154,7 +176,11 @@ func Test_clusterctlClient_GetProviderComponents(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			got, err := client.GetProviderComponents(tt.args.provider, capiProviderConfig.Type(), tt.args.targetNameSpace, tt.args.watchingNamespace)
+			options := ComponentsOptions{
+				TargetNamespace:   tt.args.targetNameSpace,
+				WatchingNamespace: tt.args.watchingNamespace,
+			}
+			got, err := client.GetProviderComponents(tt.args.provider, capiProviderConfig.Type(), options)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
@@ -165,6 +191,45 @@ func Test_clusterctlClient_GetProviderComponents(t *testing.T) {
 			g.Expect(got.Version()).To(Equal(tt.want.version))
 		})
 	}
+}
+
+func Test_getComponentsByName_withEmptyVariables(t *testing.T) {
+	g := NewWithT(t)
+
+	// Create a fake config with a provider named P1 and a variable named foo.
+	repository1Config := config.NewProvider("p1", "url", clusterctlv1.InfrastructureProviderType)
+
+	config1 := newFakeConfig().
+		WithProvider(repository1Config)
+
+	repository1 := newFakeRepository(repository1Config, config1).
+		WithPaths("root", "components.yaml").
+		WithDefaultVersion("v1.0.0").
+		WithFile("v1.0.0", "components.yaml", componentsYAML("${FOO}")).
+		WithMetadata("v1.0.0", &clusterctlv1.Metadata{
+			ReleaseSeries: []clusterctlv1.ReleaseSeries{
+				{Major: 1, Minor: 0, Contract: "v1alpha3"},
+			},
+		})
+
+	// Create a fake cluster, eventually adding some existing runtime objects to it.
+	cluster1 := newFakeCluster(cluster.Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"}, config1).WithObjs()
+
+	// Create a new fakeClient that allows to execute tests on the fake config,
+	// the fake repositories and the fake cluster.
+	client := newFakeClient(config1).
+		WithRepository(repository1).
+		WithCluster(cluster1)
+
+	options := ComponentsOptions{
+		TargetNamespace:   "ns1",
+		WatchingNamespace: "",
+		SkipVariables:     true,
+	}
+	components, err := client.GetProviderComponents(repository1Config.Name(), repository1Config.Type(), options)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(len(components.Variables())).To(Equal(1))
+	g.Expect(components.Name()).To(Equal("p1"))
 }
 
 func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
@@ -184,8 +249,8 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 					ClusterName:              "foo",
 					TargetNamespace:          "bar",
 					KubernetesVersion:        "v1.2.3",
-					ControlPlaneMachineCount: 1,
-					WorkerMachineCount:       2,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
+					WorkerMachineCount:       pointer.Int64Ptr(2),
 				},
 			},
 			wantVars: map[string]string{
@@ -204,8 +269,8 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 					ClusterName:              "foo",
 					TargetNamespace:          "bar",
 					KubernetesVersion:        "", // empty means to use value from env variables/config file
-					ControlPlaneMachineCount: 1,
-					WorkerMachineCount:       2,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
+					WorkerMachineCount:       pointer.Int64Ptr(2),
 				},
 			},
 			wantVars: map[string]string{
@@ -218,6 +283,24 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "pass (using defaults for machine counts)",
+			args: args{
+				options: GetClusterTemplateOptions{
+					ClusterName:       "foo",
+					TargetNamespace:   "bar",
+					KubernetesVersion: "v1.2.3",
+				},
+			},
+			wantVars: map[string]string{
+				"CLUSTER_NAME":                "foo",
+				"NAMESPACE":                   "bar",
+				"KUBERNETES_VERSION":          "v1.2.3",
+				"CONTROL_PLANE_MACHINE_COUNT": "1",
+				"WORKER_MACHINE_COUNT":        "0",
+			},
+			wantErr: false,
+		},
+		{
 			name: "fails for invalid cluster Name",
 			args: args{
 				options: GetClusterTemplateOptions{
@@ -225,6 +308,16 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "tolerates subdomains as cluster Name",
+			args: args{
+				options: GetClusterTemplateOptions{
+					ClusterName:     "foo.bar",
+					TargetNamespace: "baz",
+				},
+			},
+			wantErr: false,
 		},
 		{
 			name: "fails for invalid namespace Name",
@@ -254,7 +347,7 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 					ClusterName:              "foo",
 					TargetNamespace:          "bar",
 					KubernetesVersion:        "v1.2.3",
-					ControlPlaneMachineCount: -1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(-1),
 				},
 			},
 			wantErr: true,
@@ -266,8 +359,8 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 					ClusterName:              "foo",
 					TargetNamespace:          "bar",
 					KubernetesVersion:        "v1.2.3",
-					ControlPlaneMachineCount: 1,
-					WorkerMachineCount:       -1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
+					WorkerMachineCount:       pointer.Int64Ptr(-1),
 				},
 			},
 			wantErr: true,
@@ -299,6 +392,43 @@ func Test_clusterctlClient_templateOptionsToVariables(t *testing.T) {
 	}
 }
 
+func Test_clusterctlClient_templateOptionsToVariables_withExistingMachineCountVariables(t *testing.T) {
+	configClient := newFakeConfig().
+		WithVar("CONTROL_PLANE_MACHINE_COUNT", "3").
+		WithVar("WORKER_MACHINE_COUNT", "10")
+
+	c := &clusterctlClient{
+		configClient: configClient,
+	}
+	options := GetClusterTemplateOptions{
+		ClusterName:       "foo",
+		TargetNamespace:   "bar",
+		KubernetesVersion: "v1.2.3",
+	}
+
+	wantVars := map[string]string{
+		"CLUSTER_NAME":                "foo",
+		"NAMESPACE":                   "bar",
+		"KUBERNETES_VERSION":          "v1.2.3",
+		"CONTROL_PLANE_MACHINE_COUNT": "3",
+		"WORKER_MACHINE_COUNT":        "10",
+	}
+
+	if err := c.templateOptionsToVariables(options); err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	for name, wantValue := range wantVars {
+		gotValue, err := configClient.Variables().Get(name)
+		if err != nil {
+			t.Fatalf("variable %s is not definied in config variables", name)
+		}
+		if gotValue != wantValue {
+			t.Errorf("variable %s, got = %v, want %v", name, gotValue, wantValue)
+		}
+	}
+}
+
 func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 	g := NewWithT(t)
 
@@ -310,7 +440,7 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	path := filepath.Join(tmpDir, "cluster-template.yaml")
-	g.Expect(ioutil.WriteFile(path, rawTemplate, 0644)).To(Succeed())
+	g.Expect(ioutil.WriteFile(path, rawTemplate, 0600)).To(Succeed())
 
 	// Template on a repository & in a ConfigMap
 	configMap := &corev1.ConfigMap{
@@ -335,7 +465,7 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 		WithDefaultVersion("v3.0.0").
 		WithFile("v3.0.0", "cluster-template.yaml", rawTemplate)
 
-	cluster1 := newFakeCluster("kubeconfig", config1).
+	cluster1 := newFakeCluster(cluster.Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"}, config1).
 		WithProviderInventory(infraProviderConfig.Name(), infraProviderConfig.Type(), "v3.0.0", "foo", "bar").
 		WithObjs(configMap)
 
@@ -363,14 +493,14 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			name: "repository source - pass",
 			args: args{
 				options: GetClusterTemplateOptions{
-					Kubeconfig: "kubeconfig",
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ProviderRepositorySource: &ProviderRepositorySourceOptions{
 						InfrastructureProvider: "infra:v3.0.0",
 						Flavor:                 "",
 					},
 					ClusterName:              "test",
 					TargetNamespace:          "ns1",
-					ControlPlaneMachineCount: 1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				},
 			},
 			want: templateValues{
@@ -383,14 +513,14 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			name: "repository source - detects provider name/version if missing",
 			args: args{
 				options: GetClusterTemplateOptions{
-					Kubeconfig: "kubeconfig",
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ProviderRepositorySource: &ProviderRepositorySourceOptions{
 						InfrastructureProvider: "", // empty triggers auto-detection of the provider name/version
 						Flavor:                 "",
 					},
 					ClusterName:              "test",
 					TargetNamespace:          "ns1",
-					ControlPlaneMachineCount: 1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				},
 			},
 			want: templateValues{
@@ -403,14 +533,14 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			name: "repository source - use current namespace if targetNamespace is missing",
 			args: args{
 				options: GetClusterTemplateOptions{
-					Kubeconfig: "kubeconfig",
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ProviderRepositorySource: &ProviderRepositorySourceOptions{
 						InfrastructureProvider: "infra:v3.0.0",
 						Flavor:                 "",
 					},
 					ClusterName:              "test",
 					TargetNamespace:          "", // empty triggers usage of the current namespace
-					ControlPlaneMachineCount: 1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				},
 			},
 			want: templateValues{
@@ -423,13 +553,13 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			name: "URL source - pass",
 			args: args{
 				options: GetClusterTemplateOptions{
-					Kubeconfig: "kubeconfig",
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					URLSource: &URLSourceOptions{
 						URL: path,
 					},
 					ClusterName:              "test",
 					TargetNamespace:          "ns1",
-					ControlPlaneMachineCount: 1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				},
 			},
 			want: templateValues{
@@ -442,7 +572,7 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			name: "ConfigMap source - pass",
 			args: args{
 				options: GetClusterTemplateOptions{
-					Kubeconfig: "kubeconfig",
+					Kubeconfig: Kubeconfig{Path: "kubeconfig", Context: "mgmt-context"},
 					ConfigMapSource: &ConfigMapSourceOptions{
 						Namespace: "ns1",
 						Name:      "my-template",
@@ -450,7 +580,7 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 					},
 					ClusterName:              "test",
 					TargetNamespace:          "ns1",
-					ControlPlaneMachineCount: 1,
+					ControlPlaneMachineCount: pointer.Int64Ptr(1),
 				},
 			},
 			want: templateValues{
@@ -479,4 +609,115 @@ func Test_clusterctlClient_GetClusterTemplate(t *testing.T) {
 			gs.Expect(gotYaml).To(Equal(tt.want.yaml))
 		})
 	}
+}
+
+func Test_clusterctlClient_ProcessYAML(t *testing.T) {
+	g := NewWithT(t)
+	template := `v1: ${VAR1:=default1}
+v2: ${VAR2=default2}
+v3: ${VAR3:-default3}`
+	dir, err := ioutil.TempDir("", "clusterctl")
+	g.Expect(err).NotTo(HaveOccurred())
+	defer os.RemoveAll(dir)
+
+	templateFile := filepath.Join(dir, "template.yaml")
+	g.Expect(ioutil.WriteFile(templateFile, []byte(template), 0600)).To(Succeed())
+
+	inputReader := strings.NewReader(template)
+
+	tests := []struct {
+		name         string
+		options      ProcessYAMLOptions
+		expectErr    bool
+		expectedYaml string
+		expectedVars []string
+	}{
+		{
+			name: "returns the expected yaml and variables",
+			options: ProcessYAMLOptions{
+				URLSource: &URLSourceOptions{
+					URL: templateFile,
+				},
+				ListVariablesOnly: false,
+			},
+			expectErr: false,
+			expectedYaml: `v1: default1
+v2: default2
+v3: default3`,
+			expectedVars: []string{"VAR1", "VAR2", "VAR3"},
+		},
+		{
+			name: "returns the expected variables only if ListVariablesOnly is set",
+			options: ProcessYAMLOptions{
+				URLSource: &URLSourceOptions{
+					URL: templateFile,
+				},
+				ListVariablesOnly: true,
+			},
+			expectErr:    false,
+			expectedYaml: ``,
+			expectedVars: []string{"VAR1", "VAR2", "VAR3"},
+		},
+		{
+			name:      "returns error if no source was specified",
+			options:   ProcessYAMLOptions{},
+			expectErr: true,
+		},
+		{
+			name: "processes yaml from specified reader",
+			options: ProcessYAMLOptions{
+				ReaderSource: &ReaderSourceOptions{
+					Reader: inputReader,
+				},
+				ListVariablesOnly: false,
+			},
+			expectErr: false,
+			expectedYaml: `v1: default1
+v2: default2
+v3: default3`,
+			expectedVars: []string{"VAR1", "VAR2", "VAR3"},
+		},
+		{
+			name: "returns error if unable to read from reader",
+			options: ProcessYAMLOptions{
+				ReaderSource: &ReaderSourceOptions{
+					Reader: &errReader{},
+				},
+				ListVariablesOnly: false,
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config1 := newFakeConfig().
+				WithProvider(infraProviderConfig)
+			cluster1 := newFakeCluster(cluster.Kubeconfig{}, config1)
+
+			client := newFakeClient(config1).WithCluster(cluster1)
+
+			printer, err := client.ProcessYAML(tt.options)
+			if tt.expectErr {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			expectedYaml, err := printer.Yaml()
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(string(expectedYaml)).To(Equal(tt.expectedYaml))
+
+			expectedVars := printer.Variables()
+			g.Expect(expectedVars).To(ConsistOf(tt.expectedVars))
+
+		})
+	}
+
+}
+
+// errReader returns a non-EOF error on the first read.
+type errReader struct{}
+
+func (e *errReader) Read(p []byte) (n int, err error) {
+	return 0, errors.New("read error")
 }

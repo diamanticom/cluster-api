@@ -17,31 +17,22 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
 	"testing"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"github.com/gogo/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/pointer"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/patch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
-
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
-	capierrors "sigs.k8s.io/cluster-api/errors"
-	"sigs.k8s.io/cluster-api/util/kubeconfig"
-	"sigs.k8s.io/cluster-api/util/patch"
 )
 
 var _ = Describe("Cluster Reconciler", func() {
@@ -56,16 +47,16 @@ var _ = Describe("Cluster Reconciler", func() {
 		}
 
 		// Create the Cluster object and expect the Reconcile and Deployment to be created
-		Expect(k8sClient.Create(ctx, instance)).ToNot(HaveOccurred())
+		Expect(testEnv.Create(ctx, instance)).ToNot(HaveOccurred())
 		key := client.ObjectKey{Namespace: instance.Namespace, Name: instance.Name}
 		defer func() {
-			err := k8sClient.Delete(ctx, instance)
+			err := testEnv.Delete(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
 		// Make sure the Cluster exists.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, instance); err != nil {
+			if err := testEnv.Get(ctx, key, instance); err != nil {
 				return false
 			}
 			return len(instance.Finalizers) > 0
@@ -80,16 +71,16 @@ var _ = Describe("Cluster Reconciler", func() {
 				Namespace:    "default",
 			},
 		}
-		Expect(k8sClient.Create(ctx, cluster)).To(BeNil())
+		Expect(testEnv.Create(ctx, cluster)).To(BeNil())
 		key := client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, cluster)
+			err := testEnv.Delete(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
 		// Wait for reconciliation to happen.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return len(cluster.Finalizers) > 0
@@ -97,18 +88,18 @@ var _ = Describe("Cluster Reconciler", func() {
 
 		// Patch
 		Eventually(func() bool {
-			ph, err := patch.NewHelper(cluster, k8sClient)
+			ph, err := patch.NewHelper(cluster, testEnv)
 			Expect(err).ShouldNot(HaveOccurred())
 			cluster.Spec.InfrastructureRef = &v1.ObjectReference{Name: "test"}
 			cluster.Spec.ControlPlaneRef = &v1.ObjectReference{Name: "test-too"}
-			Expect(ph.Patch(ctx, cluster)).ShouldNot(HaveOccurred())
+			Expect(ph.Patch(ctx, cluster, patch.WithStatusObservedGeneration{})).ShouldNot(HaveOccurred())
 			return true
 		}, timeout).Should(BeTrue())
 
 		// Assertions
 		Eventually(func() bool {
 			instance := &clusterv1.Cluster{}
-			if err := k8sClient.Get(ctx, key, instance); err != nil {
+			if err := testEnv.Get(ctx, key, instance); err != nil {
 				return false
 			}
 			return instance.Spec.InfrastructureRef != nil &&
@@ -124,16 +115,16 @@ var _ = Describe("Cluster Reconciler", func() {
 				Namespace:    "default",
 			},
 		}
-		Expect(k8sClient.Create(ctx, cluster)).To(BeNil())
+		Expect(testEnv.Create(ctx, cluster)).To(BeNil())
 		key := client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, cluster)
+			err := testEnv.Delete(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
 		// Wait for reconciliation to happen.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return len(cluster.Finalizers) > 0
@@ -141,17 +132,17 @@ var _ = Describe("Cluster Reconciler", func() {
 
 		// Patch
 		Eventually(func() bool {
-			ph, err := patch.NewHelper(cluster, k8sClient)
+			ph, err := patch.NewHelper(cluster, testEnv)
 			Expect(err).ShouldNot(HaveOccurred())
 			cluster.Status.InfrastructureReady = true
-			Expect(ph.Patch(ctx, cluster)).ShouldNot(HaveOccurred())
+			Expect(ph.Patch(ctx, cluster, patch.WithStatusObservedGeneration{})).ShouldNot(HaveOccurred())
 			return true
 		}, timeout).Should(BeTrue())
 
 		// Assertions
 		Eventually(func() bool {
 			instance := &clusterv1.Cluster{}
-			if err := k8sClient.Get(ctx, key, instance); err != nil {
+			if err := testEnv.Get(ctx, key, instance); err != nil {
 				return false
 			}
 			return instance.Status.InfrastructureReady
@@ -166,16 +157,16 @@ var _ = Describe("Cluster Reconciler", func() {
 				Namespace:    "default",
 			},
 		}
-		Expect(k8sClient.Create(ctx, cluster)).To(BeNil())
+		Expect(testEnv.Create(ctx, cluster)).To(BeNil())
 		key := client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, cluster)
+			err := testEnv.Delete(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
 		// Wait for reconciliation to happen.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return len(cluster.Finalizers) > 0
@@ -183,18 +174,18 @@ var _ = Describe("Cluster Reconciler", func() {
 
 		// Patch
 		Eventually(func() bool {
-			ph, err := patch.NewHelper(cluster, k8sClient)
+			ph, err := patch.NewHelper(cluster, testEnv)
 			Expect(err).ShouldNot(HaveOccurred())
 			cluster.Status.InfrastructureReady = true
 			cluster.Spec.InfrastructureRef = &v1.ObjectReference{Name: "test"}
-			Expect(ph.Patch(ctx, cluster)).ShouldNot(HaveOccurred())
+			Expect(ph.Patch(ctx, cluster, patch.WithStatusObservedGeneration{})).ShouldNot(HaveOccurred())
 			return true
 		}, timeout).Should(BeTrue())
 
 		// Assertions
 		Eventually(func() bool {
 			instance := &clusterv1.Cluster{}
-			if err := k8sClient.Get(ctx, key, instance); err != nil {
+			if err := testEnv.Get(ctx, key, instance); err != nil {
 				return false
 			}
 			return instance.Status.InfrastructureReady &&
@@ -204,6 +195,8 @@ var _ = Describe("Cluster Reconciler", func() {
 	})
 
 	It("Should successfully patch a cluster object if only removing finalizers", func() {
+		Skip("This test doesn't look correct, if we remove the finalizer the reconciler takes care of re-adding it")
+
 		// Setup
 		cluster := &clusterv1.Cluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -211,16 +204,16 @@ var _ = Describe("Cluster Reconciler", func() {
 				Namespace:    "default",
 			},
 		}
-		Expect(k8sClient.Create(ctx, cluster)).To(BeNil())
+		Expect(testEnv.Create(ctx, cluster)).To(BeNil())
 		key := client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, cluster)
+			err := testEnv.Delete(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
 		// Wait for reconciliation to happen.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return len(cluster.Finalizers) > 0
@@ -228,10 +221,10 @@ var _ = Describe("Cluster Reconciler", func() {
 
 		// Patch
 		Eventually(func() bool {
-			ph, err := patch.NewHelper(cluster, k8sClient)
+			ph, err := patch.NewHelper(cluster, testEnv)
 			Expect(err).ShouldNot(HaveOccurred())
 			cluster.SetFinalizers([]string{})
-			Expect(ph.Patch(ctx, cluster)).ShouldNot(HaveOccurred())
+			Expect(ph.Patch(ctx, cluster, patch.WithStatusObservedGeneration{})).ShouldNot(HaveOccurred())
 			return true
 		}, timeout).Should(BeTrue())
 
@@ -240,7 +233,7 @@ var _ = Describe("Cluster Reconciler", func() {
 		// Assertions
 		Eventually(func() []string {
 			instance := &clusterv1.Cluster{}
-			if err := k8sClient.Get(ctx, key, instance); err != nil {
+			if err := testEnv.Get(ctx, key, instance); err != nil {
 				return []string{"not-empty"}
 			}
 			return instance.Finalizers
@@ -255,17 +248,17 @@ var _ = Describe("Cluster Reconciler", func() {
 			},
 		}
 
-		Expect(k8sClient.Create(ctx, cluster)).To(BeNil())
+		Expect(testEnv.Create(ctx, cluster)).To(BeNil())
 		key := client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, cluster)
+			err := testEnv.Delete(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 		}()
-		Expect(kubeconfig.CreateEnvTestSecret(k8sClient, cfg, cluster)).To(Succeed())
+		Expect(testEnv.CreateKubeconfigSecret(ctx, cluster)).To(Succeed())
 
 		// Wait for reconciliation to happen.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return len(cluster.Finalizers) > 0
@@ -282,7 +275,7 @@ var _ = Describe("Cluster Reconciler", func() {
 			},
 		}
 
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		Expect(testEnv.Create(ctx, node)).To(Succeed())
 
 		machine := &clusterv1.Machine{
 			ObjectMeta: metav1.ObjectMeta{
@@ -300,11 +293,11 @@ var _ = Describe("Cluster Reconciler", func() {
 				},
 			},
 		}
-
-		Expect(k8sClient.Create(ctx, machine)).To(BeNil())
+		machine.Spec.Bootstrap.DataSecretName = pointer.StringPtr("test6-bootstrapdata")
+		Expect(testEnv.Create(ctx, machine)).To(BeNil())
 		key = client.ObjectKey{Name: machine.Name, Namespace: machine.Namespace}
 		defer func() {
-			err := k8sClient.Delete(ctx, machine)
+			err := testEnv.Delete(ctx, machine)
 			Expect(err).NotTo(HaveOccurred())
 		}()
 
@@ -316,7 +309,7 @@ var _ = Describe("Cluster Reconciler", func() {
 		// we continue to see test timeouts here, that will likely point to something else being the problem, but
 		// I've yet to determine any other possibility for the test flakes.
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, machine); err != nil {
+			if err := testEnv.Get(ctx, key, machine); err != nil {
 				return false
 			}
 			return len(machine.Finalizers) > 0
@@ -325,7 +318,7 @@ var _ = Describe("Cluster Reconciler", func() {
 		// Assertion
 		key = client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}
 		Eventually(func() bool {
-			if err := k8sClient.Get(ctx, key, cluster); err != nil {
+			if err := testEnv.Get(ctx, key, cluster); err != nil {
 				return false
 			}
 			return cluster.Status.ControlPlaneInitialized
@@ -334,142 +327,6 @@ var _ = Describe("Cluster Reconciler", func() {
 })
 
 func TestClusterReconciler(t *testing.T) {
-	t.Run("metrics", func(t *testing.T) {
-
-		failureReason := capierrors.ClusterStatusError("foo")
-		tests := []struct {
-			name            string
-			cs              clusterv1.ClusterStatus
-			secret          *corev1.Secret
-			expectedMetrics map[string]float64
-		}{
-			{
-				name: "cluster control plane metric is 1 if cluster status is true ",
-				cs: clusterv1.ClusterStatus{
-					ControlPlaneInitialized: true,
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_control_plane_ready": 1},
-			},
-			{
-				name: "cluster control plane metric is 0 if cluster status is false ",
-				cs: clusterv1.ClusterStatus{
-					ControlPlaneInitialized: false,
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_control_plane_ready": 0},
-			},
-			{
-				name: "cluster infrastructure metric is 1 if cluster status is true ",
-				cs: clusterv1.ClusterStatus{
-					InfrastructureReady: true,
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_infrastructure_ready": 1},
-			},
-			{
-				name: "cluster infrastructure metric is 0 if cluster status is false ",
-				cs: clusterv1.ClusterStatus{
-					InfrastructureReady: false,
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_infrastructure_ready": 0},
-			},
-			{
-				name:            "cluster kubeconfig metric is 0 if secret is unavailable",
-				cs:              clusterv1.ClusterStatus{},
-				expectedMetrics: map[string]float64{"capi_cluster_kubeconfig_ready": 0},
-			},
-			{
-				name: "cluster kubeconfig metric is 1 if secret is available and ready",
-				cs:   clusterv1.ClusterStatus{},
-				secret: &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-cluster-kubeconfig",
-					},
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_kubeconfig_ready": 1},
-			},
-			{
-				name: "cluster error metric is 1 if FailureReason is set",
-				cs: clusterv1.ClusterStatus{
-					FailureReason: &failureReason,
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_failure_set": 1},
-			},
-			{
-				name: "cluster error metric is 1 if FailureMessage is set",
-				cs: clusterv1.ClusterStatus{
-					FailureMessage: proto.String("some-error"),
-				},
-				expectedMetrics: map[string]float64{"capi_cluster_failure_set": 1},
-			},
-			{
-				name: "cluster is ready",
-				cs: clusterv1.ClusterStatus{
-					InfrastructureReady:     true,
-					ControlPlaneInitialized: true,
-				},
-				secret: &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-cluster-kubeconfig",
-					},
-				},
-				expectedMetrics: map[string]float64{
-					"capi_cluster_control_plane_ready":  1,
-					"capi_cluster_infrastructure_ready": 1,
-					"capi_cluster_kubeconfig_ready":     1,
-					"capi_cluster_failure_set":          0,
-				},
-			},
-		}
-
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				g := NewWithT(t)
-
-				g.Expect(clusterv1.AddToScheme(scheme.Scheme)).To(Succeed())
-
-				var objs []runtime.Object
-
-				c := &clusterv1.Cluster{
-					TypeMeta: metav1.TypeMeta{
-						Kind: "Cluster",
-					},
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-cluster",
-					},
-					Spec:   clusterv1.ClusterSpec{},
-					Status: tt.cs,
-				}
-				objs = append(objs, c)
-
-				if tt.secret != nil {
-					objs = append(objs, tt.secret)
-				}
-
-				r := &ClusterReconciler{
-					Client: fake.NewFakeClientWithScheme(scheme.Scheme, objs...),
-					Log:    log.Log,
-				}
-
-				r.reconcileMetrics(context.TODO(), c)
-
-				for em, ev := range tt.expectedMetrics {
-					mr, err := metrics.Registry.Gather()
-					g.Expect(err).ToNot(HaveOccurred())
-					mf := getMetricFamily(mr, em)
-					g.Expect(mf).ToNot(BeNil())
-					for _, m := range mf.GetMetric() {
-						for _, l := range m.GetLabel() {
-							// ensure that the metric has a matching label
-							if l.GetName() == "cluster" && l.GetValue() == c.Name {
-								g.Expect(m.GetGauge().GetValue()).To(Equal(ev))
-							}
-						}
-					}
-				}
-
-			})
-		}
-	})
-
 	t.Run("machine to cluster", func(t *testing.T) {
 		cluster := &clusterv1.Cluster{
 			TypeMeta: metav1.TypeMeta{
@@ -560,15 +417,12 @@ func TestClusterReconciler(t *testing.T) {
 
 		tests := []struct {
 			name string
-			o    handler.MapObject
+			o    client.Object
 			want []ctrl.Request
 		}{
 			{
 				name: "controlplane machine, noderef is set, should return cluster",
-				o: handler.MapObject{
-					Meta:   controlPlaneWithNoderef.GetObjectMeta(),
-					Object: controlPlaneWithNoderef,
-				},
+				o:    controlPlaneWithNoderef,
 				want: []ctrl.Request{
 					{
 						NamespacedName: util.ObjectKey(cluster),
@@ -577,26 +431,17 @@ func TestClusterReconciler(t *testing.T) {
 			},
 			{
 				name: "controlplane machine, noderef is not set",
-				o: handler.MapObject{
-					Meta:   controlPlaneWithoutNoderef.GetObjectMeta(),
-					Object: controlPlaneWithoutNoderef,
-				},
+				o:    controlPlaneWithoutNoderef,
 				want: nil,
 			},
 			{
 				name: "not controlplane machine, noderef is set",
-				o: handler.MapObject{
-					Meta:   nonControlPlaneWithNoderef.GetObjectMeta(),
-					Object: nonControlPlaneWithNoderef,
-				},
+				o:    nonControlPlaneWithNoderef,
 				want: nil,
 			},
 			{
 				name: "not controlplane machine, noderef is not set",
-				o: handler.MapObject{
-					Meta:   nonControlPlaneWithoutNoderef.GetObjectMeta(),
-					Object: nonControlPlaneWithoutNoderef,
-				},
+				o:    nonControlPlaneWithoutNoderef,
 				want: nil,
 			},
 		}
@@ -608,7 +453,6 @@ func TestClusterReconciler(t *testing.T) {
 
 				r := &ClusterReconciler{
 					Client: fake.NewFakeClientWithScheme(scheme.Scheme, cluster, controlPlaneWithNoderef, controlPlaneWithoutNoderef, nonControlPlaneWithNoderef, nonControlPlaneWithoutNoderef),
-					Log:    log.Log,
 				}
 				requests := r.controlPlaneMachineToCluster(tt.o)
 				g.Expect(requests).To(Equal(tt.want))
@@ -704,6 +548,10 @@ func TestFilterOwnedDescendants(t *testing.T) {
 	g := NewWithT(t)
 
 	c := clusterv1.Cluster{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: clusterv1.GroupVersion.String(),
+			Kind:       "Cluster",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "c",
 		},
@@ -762,7 +610,7 @@ func TestFilterOwnedDescendants(t *testing.T) {
 	actual, err := d.filterOwnedDescendants(&c)
 	g.Expect(err).NotTo(HaveOccurred())
 
-	expected := []runtime.Object{
+	expected := []client.Object{
 		&md2OwnedByCluster,
 		&md4OwnedByCluster,
 		&ms2OwnedByCluster,
@@ -792,9 +640,9 @@ func TestReconcileControlPlaneInitializedControlPlaneRef(t *testing.T) {
 		},
 	}
 
-	r := &ClusterReconciler{
-		Log: log.Log,
-	}
-	g.Expect(r.reconcileControlPlaneInitialized(context.Background(), c)).To(Succeed())
+	r := &ClusterReconciler{}
+	res, err := r.reconcileControlPlaneInitialized(ctx, c)
+	g.Expect(res.IsZero()).To(BeTrue())
+	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(c.Status.ControlPlaneInitialized).To(BeFalse())
 }

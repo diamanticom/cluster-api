@@ -1,12 +1,14 @@
 
 ---
-apiVersion: admissionregistration.k8s.io/v1beta1
+apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   creationTimestamp: null
   name: mutating-webhook-configuration
 webhooks:
-- clientConfig:
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -25,7 +27,10 @@ webhooks:
     - UPDATE
     resources:
     - clusters
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -44,7 +49,10 @@ webhooks:
     - UPDATE
     resources:
     - machines
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -63,7 +71,10 @@ webhooks:
     - UPDATE
     resources:
     - machinedeployments
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -82,7 +93,10 @@ webhooks:
     - UPDATE
     resources:
     - machinehealthchecks
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -101,7 +115,10 @@ webhooks:
     - UPDATE
     resources:
     - machinesets
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -120,15 +137,40 @@ webhooks:
     - UPDATE
     resources:
     - machinepools
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
+    caBundle: Cg==
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-addons-cluster-x-k8s-io-v1alpha3-clusterresourceset
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: default.clusterresourceset.addons.cluster.x-k8s.io
+  rules:
+  - apiGroups:
+    - addons.cluster.x-k8s.io
+    apiVersions:
+    - v1alpha3
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - clusterresourcesets
+  sideEffects: None
 
 ---
-apiVersion: admissionregistration.k8s.io/v1beta1
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   creationTimestamp: null
   name: validating-webhook-configuration
 webhooks:
-- clientConfig:
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -147,7 +189,10 @@ webhooks:
     - UPDATE
     resources:
     - clusters
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -166,7 +211,10 @@ webhooks:
     - UPDATE
     resources:
     - machines
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -185,7 +233,10 @@ webhooks:
     - UPDATE
     resources:
     - machinedeployments
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -204,7 +255,10 @@ webhooks:
     - UPDATE
     resources:
     - machinehealthchecks
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -223,7 +277,10 @@ webhooks:
     - UPDATE
     resources:
     - machinesets
-- clientConfig:
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
     caBundle: Cg==
     service:
       name: webhook-service
@@ -242,3 +299,26 @@ webhooks:
     - UPDATE
     resources:
     - machinepools
+  sideEffects: None
+- admissionReviewVersions:
+  - v1beta1
+  clientConfig:
+    caBundle: Cg==
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-addons-cluster-x-k8s-io-v1alpha3-clusterresourceset
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: validation.clusterresourceset.addons.cluster.x-k8s.io
+  rules:
+  - apiGroups:
+    - addons.cluster.x-k8s.io
+    apiVersions:
+    - v1alpha3
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - clusterresourcesets
+  sideEffects: None

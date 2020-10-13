@@ -36,6 +36,7 @@ export DOCKER_CLI_EXPERIMENTAL := enabled
 TOOLS_DIR := hack/tools
 TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
 BIN_DIR := bin
+EXP_DIR := exp
 
 # Binaries.
 CONTROLLER_GEN := $(TOOLS_BIN_DIR)/controller-gen
@@ -44,8 +45,7 @@ GOLANGCI_LINT := $(TOOLS_BIN_DIR)/golangci-lint
 
 # Define Docker related variables. Releases should modify and double check these vars.
 REGISTRY ?= gcr.io/$(shell gcloud config get-value project)
-STAGING_REGISTRY := gcr.io/k8s-staging-capi-docker
-PROD_REGISTRY := us.gcr.io/k8s-artifacts-prod/capi-docker
+STAGING_REGISTRY := gcr.io/k8s-staging-cluster-api
 IMAGE_NAME ?= capd-manager
 CONTROLLER_IMG ?= $(REGISTRY)/$(IMAGE_NAME)
 TAG ?= dev
@@ -67,32 +67,6 @@ help:  ## Display this help
 .PHONY: test
 test: ## Run tests
 	go test -v ./...
-
-# core
-CORE_IMAGE_NAME ?= cluster-api-controller
-CORE_CONTROLLER_IMG ?= $(REGISTRY)/$(CORE_IMAGE_NAME)-$(ARCH):$(TAG)
-
-# bootstrap
-KUBEADM_BOOTSTRAP_IMAGE_NAME ?= kubeadm-bootstrap-controller
-KUBEADM_BOOTSTRAP_CONTROLLER_IMG ?= $(REGISTRY)/$(KUBEADM_BOOTSTRAP_IMAGE_NAME)-$(ARCH):$(TAG)
-
-# control plane
-KUBEADM_CONTROL_PLANE_IMAGE_NAME ?= kubeadm-control-plane-controller
-KUBEADM_CONTROL_PLANE_CONTROLLER_IMG ?= $(REGISTRY)/$(KUBEADM_CONTROL_PLANE_IMAGE_NAME)-$(ARCH):$(TAG)
-
-.PHONY: test-e2e
-test-e2e: ## Run the end-to-end tests
-	$(MAKE) docker-build
-	MANAGER_IMAGE=$(CONTROLLER_IMG)-$(ARCH):$(TAG) \
-		CAPI_IMAGE=$(CORE_CONTROLLER_IMG) \
-		CAPI_KUBEADM_BOOTSTRAP_IMAGE=$(KUBEADM_BOOTSTRAP_CONTROLLER_IMG) \
-		CAPI_KUBEADM_CONTROL_PLANE_IMAGE=$(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG) \
-		$(MAKE) run-e2e
-
-E2E_CONF_FILE ?= e2e/local-e2e.conf
-SKIP_RESOURCE_CLEANUP ?= false
-run-e2e:
-	go test ./e2e -v -ginkgo.v -ginkgo.trace -count=1 -timeout=35m -tags=e2e -e2e.config="$(abspath $(E2E_CONF_FILE))" -skip-resource-cleanup=$(SKIP_RESOURCE_CLEANUP)
 
 ## --------------------------------------
 ## Binaries
@@ -135,7 +109,8 @@ generate: $(CONTROLLER_GEN) ## Generate code
 generate-go: $(CONTROLLER_GEN) $(CONVERSION_GEN) ## Runs Go related generate targets
 	$(CONTROLLER_GEN) \
 		object:headerFile=$(ROOT)/hack/boilerplate/boilerplate.generatego.txt \
-		paths=./api/...
+		paths=./api/... \
+		paths=./$(EXP_DIR)/api/...
 	$(CONVERSION_GEN) \
 		--input-dirs=./api/v1alpha3 \
 		--output-file-base=zz_generated.conversion \
@@ -145,10 +120,14 @@ generate-go: $(CONTROLLER_GEN) $(CONVERSION_GEN) ## Runs Go related generate tar
 generate-manifests: $(CONTROLLER_GEN) ## Generate manifests e.g. CRD, RBAC etc.
 	$(CONTROLLER_GEN) \
 		paths=./api/... \
+		paths=./$(EXP_DIR)/api/... \
+		paths=./$(EXP_DIR)/controllers/... \
 		paths=./controllers/... \
 		crd:crdVersions=v1 \
 		rbac:roleName=manager-role \
-		output:crd:dir=./config/crd/bases
+		output:crd:dir=./config/crd/bases \
+		output:webhook:dir=./config/webhook \
+		webhook
 
 .PHONY: modules
 modules: ## Runs go mod to ensure modules are up to date.
@@ -161,7 +140,7 @@ modules: ## Runs go mod to ensure modules are up to date.
 
 .PHONY: docker-build
 docker-build: ## Build the docker image for controller-manager
-	docker build --pull --build-arg ARCH=$(ARCH) ../../.. -t $(CONTROLLER_IMG)-$(ARCH):$(TAG) --file Dockerfile
+	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) ../../.. -t $(CONTROLLER_IMG)-$(ARCH):$(TAG) --file Dockerfile
 	MANIFEST_IMG=$(CONTROLLER_IMG)-$(ARCH) MANIFEST_TAG=$(TAG) $(MAKE) set-manifest-image
 	$(MAKE) set-manifest-pull-policy
 
@@ -198,18 +177,18 @@ docker-push-manifest: ## Push the fat manifest docker image.
 .PHONY: set-manifest-image
 set-manifest-image:
 	$(info Updating kustomize image patch file for manager resource)
-	sed -i'' -e 's@image: .*@image: '"${MANIFEST_IMG}:$(MANIFEST_TAG)"'@' ./config/default/manager_image_patch.yaml
+	sed -i'' -e 's@image: .*@image: '"${MANIFEST_IMG}:$(MANIFEST_TAG)"'@' ./config/manager/manager_image_patch.yaml
 
 .PHONY: set-manifest-pull-policy
 set-manifest-pull-policy:
 	$(info Updating kustomize pull policy file for manager resource)
-	sed -i'' -e 's@imagePullPolicy: .*@imagePullPolicy: '"$(PULL_POLICY)"'@' ./config/default/manager_pull_policy.yaml
+	sed -i'' -e 's@imagePullPolicy: .*@imagePullPolicy: '"$(PULL_POLICY)"'@' ./config/manager/manager_pull_policy.yaml
 
 ## --------------------------------------
 ## Release
 ## --------------------------------------
 
-GIT_TAG := $(shell git describe --match "test/infrastructure/docker/*" --abbrev=0 2>/dev/null)
+GIT_TAG := $(shell git describe --abbrev=0 2>/dev/null)
 RELEASE_TAG := $(lastword $(subst /, ,$(GIT_TAG)))
 RELEASE_DIR := out
 
@@ -221,22 +200,21 @@ release: clean-release ## Builds and push container images using the latest git 
 	@if [ -z "${RELEASE_TAG}" ]; then echo "RELEASE_TAG is not set"; exit 1; fi
 	@if ! [ -z "$$(git status --porcelain)" ]; then echo "Your local git repository contains uncommitted changes, use git clean before proceeding."; exit 1; fi
 	git checkout "${GIT_TAG}"
-	# Push the release image to the staging bucket first.
-	REGISTRY=$(STAGING_REGISTRY) TAG=$(RELEASE_TAG) \
-		$(MAKE) docker-build-all docker-push-all
-	# Set the manifest image to the production bucket.
-	MANIFEST_IMG=$(PROD_REGISTRY)/$(IMAGE_NAME) MANIFEST_TAG=$(RELEASE_TAG) \
+	# Set the manifest image to the staging bucket.
+	MANIFEST_IMG=$(STAGING_REGISTRY)/$(IMAGE_NAME) MANIFEST_TAG=$(RELEASE_TAG) \
 		$(MAKE) set-manifest-image
 	PULL_POLICY=IfNotPresent $(MAKE) set-manifest-pull-policy
 	$(MAKE) release-manifests
-	$(MAKE) release-binaries
 
 .PHONY: release-manifests
 release-manifests: $(RELEASE_DIR) ## Builds the manifests to publish with a release
-	kustomize build config/ > $(RELEASE_DIR)/provider-components.yaml
+	kustomize build config/ > $(RELEASE_DIR)/infrastructure-components.yaml
 
 .PHONY: release-staging
 release-staging: ## Builds and push container images to the staging bucket.
+	docker pull docker.io/docker/dockerfile:experimental
+	docker pull docker.io/library/golang:1.15.2
+	docker pull gcr.io/distroless/static:latest
 	REGISTRY=$(STAGING_REGISTRY) $(MAKE) docker-build-all docker-push-all release-alias-tag
 
 RELEASE_ALIAS_TAG=$(PULL_BASE_REF)

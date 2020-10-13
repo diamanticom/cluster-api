@@ -23,17 +23,55 @@ import (
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
 
 const NoopProvider = "-"
+
+// InitOptions carries the options supported by Init.
+type InitOptions struct {
+	// Kubeconfig defines the kubeconfig to use for accessing the management cluster. If empty,
+	// default rules for kubeconfig discovery will be used.
+	Kubeconfig Kubeconfig
+
+	// CoreProvider version (e.g. cluster-api:v0.3.0) to add to the management cluster. If unspecified, the
+	// cluster-api core provider's latest release is used.
+	CoreProvider string
+
+	// BootstrapProviders and versions (e.g. kubeadm:v0.3.0) to add to the management cluster.
+	// If unspecified, the kubeadm bootstrap provider's latest release is used.
+	BootstrapProviders []string
+
+	// InfrastructureProviders and versions (e.g. aws:v0.5.0) to add to the management cluster.
+	InfrastructureProviders []string
+
+	// ControlPlaneProviders and versions (e.g. kubeadm:v0.3.0) to add to the management cluster.
+	// If unspecified, the kubeadm control plane provider latest release is used.
+	ControlPlaneProviders []string
+
+	// TargetNamespace defines the namespace where the providers should be deployed. If unspecified, each provider
+	// will be installed in a provider's default namespace.
+	TargetNamespace string
+
+	// WatchingNamespace defines the namespace the providers should watch to reconcile Cluster API objects.
+	// If unspecified, the providers watches for Cluster API objects across all namespaces.
+	WatchingNamespace string
+
+	// LogUsageInstructions instructs the init command to print the usage instructions in case of first run.
+	LogUsageInstructions bool
+
+	// skipVariables skips variable parsing in the provider components yaml.
+	// It is set to true for listing images of provider components.
+	skipVariables bool
+}
 
 // Init initializes a management cluster by adding the requested list of providers.
 func (c *clusterctlClient) Init(options InitOptions) ([]Components, error) {
 	log := logf.Log
 
 	// gets access to the management cluster
-	cluster, err := c.clusterClientFactory(options.Kubeconfig)
+	cluster, err := c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.Kubeconfig})
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +105,7 @@ func (c *clusterctlClient) Init(options InitOptions) ([]Components, error) {
 	}
 
 	// Before installing the providers, ensure the cert-manager Webhook is in place.
-	if err := cluster.CertManager().EnsureWebhook(); err != nil {
+	if err := cluster.CertManager().EnsureInstalled(); err != nil {
 		return nil, err
 	}
 
@@ -98,7 +136,7 @@ func (c *clusterctlClient) Init(options InitOptions) ([]Components, error) {
 // Init returns the list of images required for init.
 func (c *clusterctlClient) InitImages(options InitOptions) ([]string, error) {
 	// gets access to the management cluster
-	cluster, err := c.clusterClientFactory(options.Kubeconfig)
+	cluster, err := c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.Kubeconfig})
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +145,9 @@ func (c *clusterctlClient) InitImages(options InitOptions) ([]string, error) {
 	// if not we consider this the first time init is executed, and thus we enforce the installation of a core provider,
 	// a bootstrap provider and a control-plane provider (if not already explicitly requested by the user)
 	c.addDefaultProviders(cluster, &options)
+
+	// skip variable parsing when listing images
+	options.skipVariables = true
 
 	// create an installer service, add the requested providers to the install queue and then perform validation
 	// of the target state of the management cluster before starting the installation.
@@ -135,6 +176,7 @@ func (c *clusterctlClient) setupInstaller(cluster cluster.Client, options InitOp
 		installer:         installer,
 		targetNamespace:   options.TargetNamespace,
 		watchingNamespace: options.WatchingNamespace,
+		skipVariables:     options.skipVariables,
 	}
 
 	if options.CoreProvider != "" {
@@ -186,6 +228,7 @@ type addToInstallerOptions struct {
 	installer         cluster.ProviderInstaller
 	targetNamespace   string
 	watchingNamespace string
+	skipVariables     bool
 }
 
 // addToInstaller adds the components to the install queue and checks that the actual provider type match the target group
@@ -198,8 +241,12 @@ func (c *clusterctlClient) addToInstaller(options addToInstallerOptions, provide
 			}
 			continue
 		}
-
-		components, err := c.getComponentsByName(provider, providerType, options.targetNamespace, options.watchingNamespace)
+		componentsOptions := repository.ComponentsOptions{
+			TargetNamespace:   options.targetNamespace,
+			WatchingNamespace: options.watchingNamespace,
+			SkipVariables:     options.skipVariables,
+		}
+		components, err := c.getComponentsByName(provider, providerType, componentsOptions)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get provider components for the %q provider", provider)
 		}

@@ -21,15 +21,17 @@ import (
 	"fmt"
 	"time"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/pkg/errors"
 	apicorev1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	"sigs.k8s.io/cluster-api/controllers/remote"
-	capierrors "sigs.k8s.io/cluster-api/errors"
 	expv1 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -43,50 +45,51 @@ type getNodeReferencesResult struct {
 	ready      int
 }
 
-func (r *MachinePoolReconciler) reconcileNodeRefs(ctx context.Context, cluster *clusterv1.Cluster, mp *expv1.MachinePool) error {
-	logger := r.Log.WithValues("machinepool", mp.Name, "namespace", mp.Namespace)
+func (r *MachinePoolReconciler) reconcileNodeRefs(ctx context.Context, cluster *clusterv1.Cluster, mp *expv1.MachinePool) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx, "cluster", cluster.Name)
 	// Check that the MachinePool hasn't been deleted or in the process.
 	if !mp.DeletionTimestamp.IsZero() {
-		return nil
+		return ctrl.Result{}, nil
 	}
 
 	// Check that the Machine doesn't already have a NodeRefs.
 	if mp.Status.Replicas == mp.Status.ReadyReplicas && len(mp.Status.NodeRefs) == int(mp.Status.ReadyReplicas) {
-		return nil
+		conditions.MarkTrue(mp, expv1.ReplicasReadyCondition)
+		return ctrl.Result{}, nil
 	}
 
 	// Check that Cluster isn't nil.
 	if cluster == nil {
-		logger.V(2).Info("MachinePool doesn't have a linked cluster, won't assign NodeRef")
-		return nil
+		log.V(2).Info("MachinePool doesn't have a linked cluster, won't assign NodeRef")
+		return ctrl.Result{}, nil
 	}
 
-	logger = logger.WithValues("cluster", cluster.Name)
+	log = log.WithValues("cluster", cluster.Name)
 
 	// Check that the MachinePool has valid ProviderIDList.
 	if len(mp.Spec.ProviderIDList) == 0 {
-		logger.V(2).Info("MachinePool doesn't have any ProviderIDs yet")
-		return nil
+		log.V(2).Info("MachinePool doesn't have any ProviderIDs yet")
+		return ctrl.Result{}, nil
 	}
 
-	clusterClient, err := remote.NewClusterClient(ctx, r.Client, util.ObjectKey(cluster), r.scheme)
+	clusterClient, err := remote.NewClusterClient(ctx, r.Client, util.ObjectKey(cluster))
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	if err = r.deleteRetiredNodes(ctx, clusterClient, mp.Status.NodeRefs, mp.Spec.ProviderIDList); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
 	// Get the Node references.
 	nodeRefsResult, err := r.getNodeReferences(ctx, clusterClient, mp.Spec.ProviderIDList)
 	if err != nil {
 		if err == ErrNoAvailableNodes {
-			return errors.Wrapf(&capierrors.RequeueAfterError{RequeueAfter: 10 * time.Second},
-				"cannot assign NodeRefs to MachinePool, no matching Nodes")
+			log.Info("Cannot assign NodeRefs to MachinePool, no matching Nodes")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		r.recorder.Event(mp, apicorev1.EventTypeWarning, "FailedSetNodeRef", err.Error())
-		return errors.Wrapf(err, "failed to get node references")
+		return ctrl.Result{}, errors.Wrapf(err, "failed to get node references")
 	}
 
 	mp.Status.ReadyReplicas = int32(nodeRefsResult.ready)
@@ -94,32 +97,36 @@ func (r *MachinePoolReconciler) reconcileNodeRefs(ctx context.Context, cluster *
 	mp.Status.UnavailableReplicas = mp.Status.Replicas - mp.Status.AvailableReplicas
 	mp.Status.NodeRefs = nodeRefsResult.references
 
-	logger.Info("Set MachinePools's NodeRefs", "noderefs", mp.Status.NodeRefs)
+	log.Info("Set MachinePools's NodeRefs", "noderefs", mp.Status.NodeRefs)
 	r.recorder.Event(mp, apicorev1.EventTypeNormal, "SuccessfulSetNodeRefs", fmt.Sprintf("%+v", mp.Status.NodeRefs))
 
 	if mp.Status.Replicas != mp.Status.ReadyReplicas || len(nodeRefsResult.references) != int(mp.Status.ReadyReplicas) {
-		return errors.Wrapf(&capierrors.RequeueAfterError{RequeueAfter: 30 * time.Second},
-			"NodeRefs != ReadyReplicas [%q != %q] for MachinePool %q in namespace %q", len(nodeRefsResult.references), mp.Status.ReadyReplicas, mp.Name, mp.Namespace)
+		log.Info("NodeRefs != ReadyReplicas", "NodeRefs", len(nodeRefsResult.references), "ReadyReplicas", mp.Status.ReadyReplicas)
+		conditions.MarkFalse(mp, expv1.ReplicasReadyCondition, expv1.WaitingForReplicasReadyReason, clusterv1.ConditionSeverityInfo, "")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	return nil
+
+	// At this point, the required number of replicas are ready
+	conditions.MarkTrue(mp, expv1.ReplicasReadyCondition)
+	return ctrl.Result{}, nil
 }
 
 // deleteRetiredNodes deletes nodes that don't have a corresponding ProviderID in Spec.ProviderIDList.
-// A MachinePool infrastucture provider indicates an instance in the set has been deleted by
+// A MachinePool infrastructure provider indicates an instance in the set has been deleted by
 // removing its ProviderID from the slice.
 func (r *MachinePoolReconciler) deleteRetiredNodes(ctx context.Context, c client.Client, nodeRefs []apicorev1.ObjectReference, providerIDList []string) error {
-	logger := r.Log.WithValues("providerIDList", len(providerIDList))
+	log := ctrl.LoggerFrom(ctx, "providerIDList", len(providerIDList))
 	nodeRefsMap := make(map[string]*apicorev1.Node, len(nodeRefs))
 	for _, nodeRef := range nodeRefs {
 		node := &corev1.Node{}
 		if err := c.Get(ctx, client.ObjectKey{Name: nodeRef.Name}, node); err != nil {
-			logger.V(2).Info("Failed to get Node, skipping", "err", err, "nodeRef.Name", nodeRef.Name)
+			log.V(2).Info("Failed to get Node, skipping", "err", err, "nodeRef.Name", nodeRef.Name)
 			continue
 		}
 
 		nodeProviderID, err := noderefutil.NewProviderID(node.Spec.ProviderID)
 		if err != nil {
-			logger.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", node.Spec.ProviderID)
+			log.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", node.Spec.ProviderID)
 			continue
 		}
 
@@ -128,7 +135,7 @@ func (r *MachinePoolReconciler) deleteRetiredNodes(ctx context.Context, c client
 	for _, providerID := range providerIDList {
 		pid, err := noderefutil.NewProviderID(providerID)
 		if err != nil {
-			logger.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", providerID)
+			log.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", providerID)
 			continue
 		}
 		delete(nodeRefsMap, pid.ID())
@@ -142,7 +149,7 @@ func (r *MachinePoolReconciler) deleteRetiredNodes(ctx context.Context, c client
 }
 
 func (r *MachinePoolReconciler) getNodeReferences(ctx context.Context, c client.Client, providerIDList []string) (getNodeReferencesResult, error) {
-	logger := r.Log.WithValues("providerIDList", len(providerIDList))
+	log := ctrl.LoggerFrom(ctx, "providerIDList", len(providerIDList))
 
 	var ready, available int
 	nodeRefsMap := make(map[string]apicorev1.Node)
@@ -155,7 +162,7 @@ func (r *MachinePoolReconciler) getNodeReferences(ctx context.Context, c client.
 		for _, node := range nodeList.Items {
 			nodeProviderID, err := noderefutil.NewProviderID(node.Spec.ProviderID)
 			if err != nil {
-				logger.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", node.Spec.ProviderID)
+				log.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", node.Spec.ProviderID)
 				continue
 			}
 
@@ -171,7 +178,7 @@ func (r *MachinePoolReconciler) getNodeReferences(ctx context.Context, c client.
 	for _, providerID := range providerIDList {
 		pid, err := noderefutil.NewProviderID(providerID)
 		if err != nil {
-			logger.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", providerID)
+			log.V(2).Info("Failed to parse ProviderID, skipping", "err", err, "providerID", providerID)
 			continue
 		}
 		if node, ok := nodeRefsMap[pid.ID()]; ok {

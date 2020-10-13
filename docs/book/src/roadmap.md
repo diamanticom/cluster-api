@@ -2,44 +2,51 @@
 
 This roadmap is a constant work in progress, subject to frequent revision. Dates are approximations.
 
-## Ongoing
 
-- Documentation improvements
+## v0.3.7 (v1alpha3+) ~ June/July 2020
 
-## v0.3 (v1alpha3) ~ March 2020
+|Area|Description|Issue/Proposal|
+|--|--|--|
+|Testing|E2E Test plan|[Spreadsheet](https://docs.google.com/spreadsheets/d/1uB3DyacOLctRjbI6ov7mVoRb6PnM4ktTABxBygt5sKI/edit#gid=0)
+|Testing|Enable webhooks in integration tests|[#2788](https://github.com/kubernetes-sigs/cluster-api/issues/2788)|
+|Control Plane|KubeadmControlPlane robustness|[#2753](https://github.com/kubernetes-sigs/cluster-api/issues/2753)|
+|Control Plane|KubeadmControlPlane adoption|[#2214](https://github.com/kubernetes-sigs/cluster-api/issues/2214)|
+|Extensibility|Clusterctl library should support extensible templating|[#2339](https://github.com/kubernetes-sigs/cluster-api/issues/2339)|
+|Cluster Lifecycle|ClusterResourceSet experiment|[#2395](https://github.com/kubernetes-sigs/cluster-api/issues/2395)|
+|Core Improvements|Library to watch remote workload clusters|[#2414](https://github.com/kubernetes-sigs/cluster-api/issues/2414)|
+|API, UX|Support and define conditions on cluster api objects|[#1658](https://github.com/kubernetes-sigs/cluster-api/issues/1658)|
+|Extensibility, Infrastructure|Support spot instances|[#1876](https://github.com/kubernetes-sigs/cluster-api/issues/1876)|
+|Extensibility|Machine pre-deletion hooks|[#1514](https://github.com/kubernetes-sigs/cluster-api/issues/1514)|
 
-- [Control plane provider concept, KubeadmControlPlane implementation](https://github.com/kubernetes-sigs/cluster-api/blob/bf51a2502f9007b531f6a9a2c1a4eae1586fb8ca/docs/proposals/20191017-kubeadm-based-control-plane.md)
-- [clusterctl v2 - easier installation & upgrades of Cluster API + providers](https://github.com/kubernetes-sigs/cluster-api/blob/bf51a2502f9007b531f6a9a2c1a4eae1586fb8ca/docs/proposals/20191016-clusterctl-redesign.md)
-- [Integration with cloud provider VM scaling groups (MachinePools)](https://github.com/kubernetes-sigs/cluster-api/blob/bf51a2502f9007b531f6a9a2c1a4eae1586fb8ca/docs/proposals/20190919-machinepool-api.md)
-- [Machine failure remediation](https://github.com/kubernetes-sigs/cluster-api/blob/bf51a2502f9007b531f6a9a2c1a4eae1586fb8ca/docs/proposals/20191030-machine-health-checking.md)
-- [Provider end to end testing framework](https://github.com/kubernetes-sigs/cluster-api/blob/bf51a2502f9007b531f6a9a2c1a4eae1586fb8ca/docs/proposals/20191016-e2e-test-framework.md)
+## v0.4 (v1alpha4) ~ Q4 2020
 
-## v0.4 (v1alpha4) ~ July 2020
+|Area|Description|Issue/Proposal|
+|--|--|--|
+|UX, Bootstrap|Machine bootstrap failure detection|[#2554](https://github.com/kubernetes-sigs/cluster-api/issues/2554)|
+|Extensibility|Support pluggable machine load balancers|[#1250](https://github.com/kubernetes-sigs/cluster-api/issues/1250)|
+|Tooling Improvements| Define clusterctl inventory specification & have providers implement it|TBA|
+|Core Improvements|Move away from corev1.ObjectReference|[#2318](https://github.com/kubernetes-sigs/cluster-api/issues/2318)|
+|Dependency|Kubeadm v1beta2 types and support|[#2769](https://github.com/kubernetes-sigs/cluster-api/issues/2769)|
+|Integration|Autoscaler scale to and from zero|[#2530](https://github.com/kubernetes-sigs/cluster-api/issues/2530)|
 
-- [Machine bootstrap failure detection](https://github.com/kubernetes-sigs/cluster-api-provider-aws/issues/972)
-- [Improved status conditions](https://github.com/kubernetes-sigs/cluster-api/issues/1658)
-- [Machine load balancers](https://github.com/kubernetes-sigs/cluster-api/issues/1250)
-- [Extensible machine pre-delete hooks](https://github.com/kubernetes-sigs/cluster-api/issues/1514)
-- Define clusterctl inventory specification & have providers implement it
-- Figure out how to change configurations through rolling updates (e.g. apiserver flags, DNS/addons, etc.)
-- [Spot instances support](https://github.com/kubernetes-sigs/cluster-api/issues/1876)
 
-## v0.5 (v1alpha5? v1beta1?) ~ November 2020
+## v1beta1/v1 ~ TBA
 
-- ?
+|Area|Description|Issue/Proposal|
+|--|--|--|
+|Maturity, Feedback|Submit the project for Kubernetes API Review|TBA|
 
-## TBD
+---
 
-- [Pluggable MachineDeployment upgrade strategies](https://github.com/kubernetes-sigs/cluster-api/issues/1754)
-- Dual stack IPv4/IPv6 support
-- Windows nodes
-- Auto-scaling support (either with cluster-autoscaler, or something else)
-- UEFI booting (image-builder)
-- GPU support (BitFusion, Elastic GPU, etc.) (may be provider-specific)
-- SR-IOV support (may be provider-specific, may be image-builder)
-- FIPS/NIST/STIG compliance
-- [Simplified cluster creation experience](https://github.com/kubernetes-sigs/cluster-api/issues/1227)
-- Solid story on certificate management
-- [Node attestation](https://github.com/kubernetes-sigs/cluster-api/issues/1739)
-- Desired machine states ([running/stopped](https://github.com/kubernetes-sigs/cluster-api/issues/1810) / [restart](https://github.com/kubernetes-sigs/cluster-api/issues/1808))
-- Define Cluster API conformance
+## Backlog
+
+> Items within this category have been identified as potential candidates for the project
+> and can be moved up into a milestone if there is enough interest.
+
+|Area|Description|Issue/Proposal|
+|--|--|--|
+|Conformance| Define Cluster API provider conformance|TBA|
+|Core Improvements|Pluggable MachineDeployment upgrade strategies|[#1754](https://github.com/kubernetes-sigs/cluster-api/issues/1754)|
+|UX|Simplified cluster creation experience|[#1227](https://github.com/kubernetes-sigs/cluster-api/issues/1227)|
+|Bootstrap, Infrastructure|Document approaches for infrastructure providers to consider for securing sensitive bootstrap data|[#1739](https://github.com/kubernetes-sigs/cluster-api/issues/1739)|
+|Dependency|Clusterctl manages cert-manager lifecycle|[#2635](https://github.com/kubernetes-sigs/cluster-api/issues/2635)|

@@ -17,25 +17,24 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func init() {
@@ -105,7 +104,7 @@ var _ = Describe("Reconcile Machine Phases", func() {
 	}
 
 	BeforeEach(func() {
-		defaultKubeconfigSecret = kubeconfig.GenerateSecret(defaultCluster, kubeconfig.FromEnvTestConfig(cfg, defaultCluster))
+		defaultKubeconfigSecret = kubeconfig.GenerateSecret(defaultCluster, kubeconfig.FromEnvTestConfig(&rest.Config{}, defaultCluster))
 	})
 
 	It("Should set OwnerReference and cluster name label on external objects", func() {
@@ -118,20 +117,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Requeue).To(BeTrue())
+		Expect(res.RequeueAfter).To(Equal(externalReadyWait))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 
 		Expect(r.Client.Get(ctx, types.NamespacedName{Name: bootstrapConfig.GetName(), Namespace: bootstrapConfig.GetNamespace()}, bootstrapConfig)).To(Succeed())
 
@@ -154,20 +151,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Requeue).To(BeTrue())
+		Expect(res.RequeueAfter).To(Equal(externalReadyWait))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhasePending))
 
 		// LastUpdated should be set as the phase changes
@@ -195,20 +190,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Requeue).To(BeTrue())
+		Expect(res.Requeue).To(BeFalse())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseProvisioning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -262,22 +255,20 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 		Expect(machine.Status.Addresses).To(HaveLen(2))
 		Expect(*machine.Spec.FailureDomain).To(Equal("us-east-2a"))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -316,21 +307,19 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 		Expect(machine.Status.Addresses).To(HaveLen(0))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -381,20 +370,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseRunning))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -426,20 +413,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Requeue).To(BeTrue())
+		Expect(res.RequeueAfter).To(Equal(externalReadyWait))
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseProvisioned))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -493,20 +478,18 @@ var _ = Describe("Reconcile Machine Phases", func() {
 				defaultCluster,
 				defaultKubeconfigSecret,
 				machine,
-				external.TestGenericBootstrapCRD,
-				external.TestGenericInfrastructureCRD,
+				external.TestGenericBootstrapCRD.DeepCopy(),
+				external.TestGenericInfrastructureCRD.DeepCopy(),
 				bootstrapConfig,
 				infraConfig,
 			),
-			Log:    log.Log,
-			scheme: scheme.Scheme,
 		}
 
-		res, err := r.reconcile(context.Background(), defaultCluster, machine)
+		res, err := r.reconcile(ctx, defaultCluster, machine)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
 
-		r.reconcilePhase(context.Background(), machine)
+		r.reconcilePhase(ctx, machine)
 		Expect(machine.Status.GetTypedPhase()).To(Equal(clusterv1.MachinePhaseDeleting))
 
 		// Verify that the LastUpdated timestamp was updated
@@ -548,6 +531,7 @@ func TestReconcileBootstrap(t *testing.T) {
 		machine         *clusterv1.Machine
 		expectError     bool
 		expected        func(g *WithT, m *clusterv1.Machine)
+		result          *ctrl.Result
 	}{
 		{
 			name: "new machine, bootstrap config ready with data",
@@ -603,7 +587,8 @@ func TestReconcileBootstrap(t *testing.T) {
 				"spec":   map[string]interface{}{},
 				"status": map[string]interface{}{},
 			},
-			expectError: true,
+			expectError: false,
+			result:      &ctrl.Result{RequeueAfter: externalReadyWait},
 			expected: func(g *WithT, m *clusterv1.Machine) {
 				g.Expect(m.Status.BootstrapReady).To(BeFalse())
 			},
@@ -681,13 +666,22 @@ func TestReconcileBootstrap(t *testing.T) {
 			},
 		},
 		{
-			name: "existing machine, bootstrap provider is not ready",
+			name: "existing machine, bootstrap provider is not ready, and ownerref updated",
 			bootstrapConfig: map[string]interface{}{
 				"kind":       "BootstrapMachine",
 				"apiVersion": "bootstrap.cluster.x-k8s.io/v1alpha3",
 				"metadata": map[string]interface{}{
 					"name":      "bootstrap-config1",
 					"namespace": "default",
+					"ownerReferences": []interface{}{
+						map[string]interface{}{
+							"apiVersion": clusterv1.GroupVersion.String(),
+							"kind":       "MachineSet",
+							"name":       "ms",
+							"uid":        "1",
+							"controller": true,
+						},
+					},
 				},
 				"spec": map[string]interface{}{},
 				"status": map[string]interface{}{
@@ -712,7 +706,57 @@ func TestReconcileBootstrap(t *testing.T) {
 					BootstrapReady: true,
 				},
 			},
+			expectError: false,
+			result:      &ctrl.Result{RequeueAfter: externalReadyWait},
+			expected: func(g *WithT, m *clusterv1.Machine) {
+				g.Expect(m.GetOwnerReferences()).NotTo(ContainRefOfGroupKind("cluster.x-k8s.io", "MachineSet"))
+			},
+		},
+		{
+			name: "existing machine, machineset owner and version v1alpha2, and ownerref updated",
+			bootstrapConfig: map[string]interface{}{
+				"kind":       "BootstrapMachine",
+				"apiVersion": "bootstrap.cluster.x-k8s.io/v1alpha3",
+				"metadata": map[string]interface{}{
+					"name":      "bootstrap-config1",
+					"namespace": "default",
+					"ownerReferences": []interface{}{
+						map[string]interface{}{
+							"apiVersion": "cluster.x-k8s.io/v1alpha2",
+							"kind":       "MachineSet",
+							"name":       "ms",
+							"uid":        "1",
+							"controller": true,
+						},
+					},
+				},
+				"spec": map[string]interface{}{},
+				"status": map[string]interface{}{
+					"ready": true,
+				},
+			},
+			machine: &clusterv1.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bootstrap-test-existing",
+					Namespace: "default",
+				},
+				Spec: clusterv1.MachineSpec{
+					Bootstrap: clusterv1.Bootstrap{
+						ConfigRef: &corev1.ObjectReference{
+							APIVersion: "bootstrap.cluster.x-k8s.io/v1alpha2",
+							Kind:       "BootstrapMachine",
+							Name:       "bootstrap-config1",
+						},
+					},
+				},
+				Status: clusterv1.MachineStatus{
+					BootstrapReady: true,
+				},
+			},
 			expectError: true,
+			expected: func(g *WithT, m *clusterv1.Machine) {
+				g.Expect(m.GetOwnerReferences()).NotTo(ContainRefOfGroupKind("cluster.x-k8s.io", "MachineSet"))
+			},
 		},
 	}
 
@@ -730,15 +774,13 @@ func TestReconcileBootstrap(t *testing.T) {
 			r := &MachineReconciler{
 				Client: fake.NewFakeClientWithScheme(scheme.Scheme,
 					tc.machine,
-					external.TestGenericBootstrapCRD,
-					external.TestGenericInfrastructureCRD,
+					external.TestGenericBootstrapCRD.DeepCopy(),
+					external.TestGenericInfrastructureCRD.DeepCopy(),
 					bootstrapConfig,
 				),
-				Log:    log.Log,
-				scheme: scheme.Scheme,
 			}
 
-			err := r.reconcileBootstrap(context.Background(), defaultCluster, tc.machine)
+			res, err := r.reconcileBootstrap(ctx, defaultCluster, tc.machine)
 			if tc.expectError {
 				g.Expect(err).ToNot(BeNil())
 			} else {
@@ -747,6 +789,10 @@ func TestReconcileBootstrap(t *testing.T) {
 
 			if tc.expected != nil {
 				tc.expected(g, tc.machine)
+			}
+
+			if tc.result != nil {
+				g.Expect(res).To(Equal(*tc.result))
 			}
 		})
 	}
@@ -802,6 +848,15 @@ func TestReconcileInfrastructure(t *testing.T) {
 				"metadata": map[string]interface{}{
 					"name":      "infra-config1",
 					"namespace": "default",
+					"ownerReferences": []interface{}{
+						map[string]interface{}{
+							"apiVersion": clusterv1.GroupVersion.String(),
+							"kind":       "MachineSet",
+							"name":       "ms",
+							"uid":        "1",
+							"controller": true,
+						},
+					},
 				},
 				"spec": map[string]interface{}{
 					"providerID": "test://id-1",
@@ -824,6 +879,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			expectChanged: true,
 			expected: func(g *WithT, m *clusterv1.Machine) {
 				g.Expect(m.Status.InfrastructureReady).To(BeTrue())
+				g.Expect(m.GetOwnerReferences()).NotTo(ContainRefOfGroupKind("cluster.x-k8s.io", "MachineSet"))
 			},
 		},
 		{
@@ -931,16 +987,14 @@ func TestReconcileInfrastructure(t *testing.T) {
 			r := &MachineReconciler{
 				Client: fake.NewFakeClientWithScheme(scheme.Scheme,
 					tc.machine,
-					external.TestGenericBootstrapCRD,
-					external.TestGenericInfrastructureCRD,
+					external.TestGenericBootstrapCRD.DeepCopy(),
+					external.TestGenericInfrastructureCRD.DeepCopy(),
 					infraConfig,
 				),
-				Log:    log.Log,
-				scheme: scheme.Scheme,
 			}
 
-			err := r.reconcileInfrastructure(context.Background(), defaultCluster, tc.machine)
-			r.reconcilePhase(context.Background(), tc.machine)
+			_, err := r.reconcileInfrastructure(ctx, defaultCluster, tc.machine)
+			r.reconcilePhase(ctx, tc.machine)
 			if tc.expectError {
 				g.Expect(err).ToNot(BeNil())
 			} else {
@@ -952,13 +1006,4 @@ func TestReconcileInfrastructure(t *testing.T) {
 			}
 		})
 	}
-}
-
-func getMetricFamily(list []*dto.MetricFamily, metricName string) *dto.MetricFamily {
-	for _, mf := range list {
-		if mf.GetName() == metricName {
-			return mf
-		}
-	}
-	return nil
 }

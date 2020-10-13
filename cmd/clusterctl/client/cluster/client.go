@@ -23,16 +23,31 @@ import (
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
-	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test"
+	yaml "sigs.k8s.io/cluster-api/cmd/clusterctl/client/yamlprocessor"
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	minimumKubernetesVersion = "v1.19.1"
 )
 
 var (
 	ctx = context.TODO()
 )
+
+// Kubeconfig is a type that specifies inputs related to the actual
+// kubeconfig.
+type Kubeconfig struct {
+	// Path to the kubeconfig file
+	Path string
+	// Specify context within the kubeconfig file. If empty, cluster client
+	// will use the current context.
+	Context string
+}
 
 // Client is used to interact with a management cluster.
 // A management cluster contains following categories of objects:
@@ -40,8 +55,8 @@ var (
 // - provider inventory items (e.g. the list of installed providers/versions)
 // - provider objects (e.g. clusters, AWS clusters, machines etc.)
 type Client interface {
-	// Kubeconfig return the path to kubeconfig used to access to a management cluster.
-	Kubeconfig() string
+	// Kubeconfig returns the kubeconfig used to access to a management cluster.
+	Kubeconfig() Kubeconfig
 
 	// Proxy return the Proxy used for operating objects in the management cluster.
 	Proxy() Proxy
@@ -71,6 +86,9 @@ type Client interface {
 
 	// Template has methods to work with templates stored in the cluster.
 	Template() TemplateClient
+
+	// WorkloadCluster has methods for fetching kubeconfig of workload cluster from management cluster.
+	WorkloadCluster() WorkloadCluster
 }
 
 // PollImmediateWaiter tries a condition func until it returns true, an error, or the timeout is reached.
@@ -79,10 +97,11 @@ type PollImmediateWaiter func(interval, timeout time.Duration, condition wait.Co
 // clusterClient implements Client.
 type clusterClient struct {
 	configClient            config.Client
-	kubeconfig              string
+	kubeconfig              Kubeconfig
 	proxy                   Proxy
 	repositoryClientFactory RepositoryClientFactory
 	pollImmediateWaiter     PollImmediateWaiter
+	processor               yaml.Processor
 }
 
 type RepositoryClientFactory func(provider config.Provider, configClient config.Client, options ...repository.Option) (repository.Client, error)
@@ -90,7 +109,7 @@ type RepositoryClientFactory func(provider config.Provider, configClient config.
 // ensure clusterClient implements Client.
 var _ Client = &clusterClient{}
 
-func (c *clusterClient) Kubeconfig() string {
+func (c *clusterClient) Kubeconfig() Kubeconfig {
 	return c.kubeconfig
 }
 
@@ -123,7 +142,11 @@ func (c *clusterClient) ProviderUpgrader() ProviderUpgrader {
 }
 
 func (c *clusterClient) Template() TemplateClient {
-	return newTemplateClient(c.proxy, c.configClient)
+	return newTemplateClient(TemplateClientInput{c.proxy, c.configClient, c.processor})
+}
+
+func (c *clusterClient) WorkloadCluster() WorkloadCluster {
+	return newWorkloadCluster(c.proxy)
 }
 
 // Option is a configuration option supplied to New
@@ -151,15 +174,27 @@ func InjectPollImmediateWaiter(pollImmediateWaiter PollImmediateWaiter) Option {
 	}
 }
 
+// InjectYamlProcessor allows you to override the yaml processor that the
+// cluster client uses. By default, the SimpleProcessor is used. This is
+// true even if a nil processor is injected.
+func InjectYamlProcessor(p yaml.Processor) Option {
+	return func(c *clusterClient) {
+		if p != nil {
+			c.processor = p
+		}
+	}
+}
+
 // New returns a cluster.Client.
-func New(kubeconfig string, configClient config.Client, options ...Option) Client {
+func New(kubeconfig Kubeconfig, configClient config.Client, options ...Option) Client {
 	return newClusterClient(kubeconfig, configClient, options...)
 }
 
-func newClusterClient(kubeconfig string, configClient config.Client, options ...Option) *clusterClient {
+func newClusterClient(kubeconfig Kubeconfig, configClient config.Client, options ...Option) *clusterClient {
 	client := &clusterClient{
 		configClient: configClient,
 		kubeconfig:   kubeconfig,
+		processor:    yaml.NewSimpleProcessor(),
 	}
 	for _, o := range options {
 		o(client)
@@ -167,7 +202,7 @@ func newClusterClient(kubeconfig string, configClient config.Client, options ...
 
 	// if there is an injected proxy, use it, otherwise use a default one
 	if client.proxy == nil {
-		client.proxy = newProxy(kubeconfig)
+		client.proxy = newProxy(client.kubeconfig)
 	}
 
 	// if there is an injected repositoryClientFactory, use it, otherwise use the default one
@@ -184,8 +219,14 @@ func newClusterClient(kubeconfig string, configClient config.Client, options ...
 }
 
 type Proxy interface {
+	// GetConfig returns the rest.Config
+	GetConfig() (*rest.Config, error)
+
 	// CurrentNamespace returns the namespace from the current context in the kubeconfig file
 	CurrentNamespace() (string, error)
+
+	// ValidateKubernetesVersion returns an error if management cluster version less than minimumKubernetesVersion
+	ValidateKubernetesVersion() error
 
 	// NewClient returns a new controller runtime Client object for working on the management cluster
 	NewClient() (client.Client, error)
@@ -194,10 +235,8 @@ type Proxy interface {
 	ListResources(labels map[string]string, namespaces ...string) ([]unstructured.Unstructured, error)
 }
 
-var _ Proxy = &test.FakeProxy{}
-
 // retryWithExponentialBackoff repeats an operation until it passes or the exponential backoff times out.
-func retryWithExponentialBackoff(opts wait.Backoff, operation func() error) error { //nolint:unparam
+func retryWithExponentialBackoff(opts wait.Backoff, operation func() error) error {
 	log := logf.Log
 
 	i := 0

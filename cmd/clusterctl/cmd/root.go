@@ -18,15 +18,28 @@ package cmd
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/util/homedir"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
 
-var cfgFile string
+type stackTracer interface {
+	StackTrace() errors.StackTrace
+}
+
+var (
+	cfgFile   string
+	verbosity *int
+)
 
 var RootCmd = &cobra.Command{
 	Use:          "clusterctl",
@@ -35,11 +48,54 @@ var RootCmd = &cobra.Command{
 	Long: LongDesc(`
 		Get started with Cluster API using clusterctl to create a management cluster,
 		install providers, and create templates for your workload cluster.`),
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Check if Config folder (~/.cluster-api) exist and if not create it
+		configFolderPath := filepath.Join(homedir.HomeDir(), config.ConfigFolder)
+		if _, err := os.Stat(configFolderPath); os.IsNotExist(err) {
+			if err := os.MkdirAll(filepath.Dir(configFolderPath), os.ModePerm); err != nil {
+				return errors.Wrapf(err, "failed to create the clusterctl config directory: %s", configFolderPath)
+			}
+		}
+		return nil
+	},
+	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		// Check if clusterctl needs an upgrade "AFTER" running each command
+		// and sub-command.
+		configClient, err := config.New(cfgFile)
+		if err != nil {
+			return err
+		}
+		output, err := newVersionChecker(configClient.Variables()).Check()
+		if err != nil {
+			return errors.Wrap(err, "unable to verify clusterctl version")
+		}
+		if len(output) != 0 {
+			// Print the output in yellow so it is more visible.
+			fmt.Fprintf(os.Stderr, "\033[33m%s\033[0m", output)
+		}
+
+		// clean the downloaded config if was fetched from remote
+		downloadConfigFile := filepath.Join(homedir.HomeDir(), config.ConfigFolder, config.DownloadConfigFile)
+		if _, err := os.Stat(downloadConfigFile); err == nil {
+			if verbosity != nil && *verbosity >= 5 {
+				fmt.Fprintf(os.Stdout, "Removing downloaded clusterctl config file: %s\n", config.DownloadConfigFile)
+			}
+			_ = os.Remove(downloadConfigFile)
+		}
+
+		return nil
+	},
 }
 
 func Execute() {
 	if err := RootCmd.Execute(); err != nil {
-		// TODO: print error stack if log v>0
+		if verbosity != nil && *verbosity >= 5 {
+			if err, ok := err.(stackTracer); ok {
+				for _, f := range err.StackTrace() {
+					fmt.Fprintf(os.Stderr, "%+s:%d\n", f, f)
+				}
+			}
+		}
 		// TODO: print cmd help if validation error
 		os.Exit(1)
 	}
@@ -48,12 +104,33 @@ func Execute() {
 func init() {
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
-	verbosity := flag.CommandLine.Int("v", 0, "Set the log level verbosity.")
-	logf.SetLogger(logf.NewLogger(logf.WithThreshold(verbosity)))
+	verbosity = flag.CommandLine.Int("v", 0, "Set the log level verbosity. This overrides the CLUSTERCTL_LOG_LEVEL environment variable.")
 
 	RootCmd.PersistentFlags().AddGoFlagSet(flag.CommandLine)
 	RootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		"Path to clusterctl configuration (default is `$HOME/.cluster-api/clusterctl.yaml`)")
+		"Path to clusterctl configuration (default is `$HOME/.cluster-api/clusterctl.yaml`) or to a remote location (i.e. https://example.com/clusterctl.yaml)")
+
+	cobra.OnInitialize(initConfig)
+}
+
+func initConfig() {
+	// check if the CLUSTERCTL_LOG_LEVEL was set via env var or in the config file
+	if *verbosity == 0 {
+		configClient, err := config.New(cfgFile)
+		if err == nil {
+			v, err := configClient.Variables().Get("CLUSTERCTL_LOG_LEVEL")
+			if err == nil && v != "" {
+				verbosityFromEnv, err := strconv.Atoi(v)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to convert CLUSTERCTL_LOG_LEVEL string to an int. err=%s\n", err.Error())
+					os.Exit(1)
+				}
+				verbosity = &verbosityFromEnv
+			}
+		}
+	}
+
+	logf.SetLogger(logf.NewLogger(logf.WithThreshold(verbosity)))
 }
 
 const Indentation = `  `

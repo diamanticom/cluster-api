@@ -30,14 +30,11 @@ import (
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/util"
-	"sigs.k8s.io/cluster-api/util/kubeconfig"
 )
 
 var _ reconcile.Reconciler = &MachineDeploymentReconciler{}
@@ -48,18 +45,18 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 
 	BeforeEach(func() {
 		By("Creating the namespace")
-		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+		Expect(testEnv.Create(ctx, namespace)).To(Succeed())
 		By("Creating the Cluster")
-		Expect(k8sClient.Create(ctx, testCluster)).To(Succeed())
+		Expect(testEnv.Create(ctx, testCluster)).To(Succeed())
 		By("Creating the Cluster Kubeconfig Secret")
-		Expect(kubeconfig.CreateEnvTestSecret(k8sClient, cfg, testCluster)).To(Succeed())
+		Expect(testEnv.CreateKubeconfigSecret(ctx, testCluster)).To(Succeed())
 	})
 
 	AfterEach(func() {
 		By("Deleting the Cluster")
-		Expect(k8sClient.Delete(ctx, testCluster)).To(Succeed())
+		Expect(testEnv.Delete(ctx, testCluster)).To(Succeed())
 		By("Deleting the namespace")
-		Expect(k8sClient.Delete(ctx, namespace)).To(Succeed())
+		Expect(testEnv.Delete(ctx, namespace)).To(Succeed())
 	})
 
 	It("Should reconcile a MachineDeployment", func() {
@@ -67,7 +64,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 			"foo":                      "bar",
 			clusterv1.ClusterLabelName: testCluster.Name,
 		}
-		version := "1.10.3"
+		version := "v1.10.3"
 		deployment := &clusterv1.MachineDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "md-",
@@ -106,7 +103,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 							Name:       "md-template",
 						},
 						Bootstrap: clusterv1.Bootstrap{
-							Data: pointer.StringPtr("data"),
+							DataSecretName: pointer.StringPtr("data-secret-name"),
 						},
 					},
 				},
@@ -123,8 +120,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 			"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha3",
 			"metadata":   map[string]interface{}{},
 			"spec": map[string]interface{}{
-				"size":       "3xlarge",
-				"providerID": "test:////id",
+				"size": "3xlarge",
 			},
 		}
 		infraTmpl := &unstructured.Unstructured{
@@ -139,20 +135,20 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		infraTmpl.SetName("md-template")
 		infraTmpl.SetNamespace(namespace.Name)
 		By("Creating the infrastructure template")
-		Expect(k8sClient.Create(ctx, infraTmpl)).To(Succeed())
+		Expect(testEnv.Create(ctx, infraTmpl)).To(Succeed())
 
 		// Create the MachineDeployment object and expect Reconcile to be called.
 		By("Creating the MachineDeployment")
-		Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+		Expect(testEnv.Create(ctx, deployment)).To(Succeed())
 		defer func() {
 			By("Deleting the MachineDeployment")
-			Expect(k8sClient.Delete(ctx, deployment)).To(Succeed())
+			Expect(testEnv.Delete(ctx, deployment)).To(Succeed())
 		}()
 
 		By("Verifying the MachineDeployment has a cluster label and ownerRef")
 		Eventually(func() bool {
 			key := client.ObjectKey{Name: deployment.Name, Namespace: deployment.Namespace}
-			if err := k8sClient.Get(ctx, key, deployment); err != nil {
+			if err := testEnv.Get(ctx, key, deployment); err != nil {
 				return false
 			}
 			if len(deployment.Labels) == 0 || deployment.Labels[clusterv1.ClusterLabelName] != testCluster.Name {
@@ -168,7 +164,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		By("Verifying the MachineSet was created")
 		machineSets := &clusterv1.MachineSetList{}
 		Eventually(func() int {
-			if err := k8sClient.List(ctx, machineSets, msListOpts...); err != nil {
+			if err := testEnv.List(ctx, machineSets, msListOpts...); err != nil {
 				return -1
 			}
 			return len(machineSets.Items)
@@ -176,7 +172,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 
 		By("Verifying the linked infrastructure template has a cluster owner reference")
 		Eventually(func() bool {
-			obj, err := external.Get(ctx, k8sClient, &deployment.Spec.Template.Spec.InfrastructureRef, deployment.Namespace)
+			obj, err := external.Get(ctx, testEnv, &deployment.Spec.Template.Spec.InfrastructureRef, deployment.Namespace)
 			if err != nil {
 				return false
 			}
@@ -194,7 +190,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		By("Verify expected number of machines are created")
 		machines := &clusterv1.MachineList{}
 		Eventually(func() int {
-			if err := k8sClient.List(ctx, machines, client.InNamespace(namespace.Name)); err != nil {
+			if err := testEnv.List(ctx, machines, client.InNamespace(namespace.Name)); err != nil {
 				return -1
 			}
 			return len(machines.Items)
@@ -208,15 +204,15 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 
 		firstMachineSet := machineSets.Items[0]
 		Expect(*firstMachineSet.Spec.Replicas).To(BeEquivalentTo(2))
-		Expect(*firstMachineSet.Spec.Template.Spec.Version).To(BeEquivalentTo("1.10.3"))
+		Expect(*firstMachineSet.Spec.Template.Spec.Version).To(BeEquivalentTo("v1.10.3"))
 
 		//
 		// Delete firstMachineSet and expect Reconcile to be called to replace it.
 		//
 		By("Deleting the initial MachineSet")
-		Expect(k8sClient.Delete(ctx, &firstMachineSet)).To(Succeed())
+		Expect(testEnv.Delete(ctx, &firstMachineSet)).To(Succeed())
 		Eventually(func() bool {
-			if err := k8sClient.List(ctx, machineSets, msListOpts...); err != nil {
+			if err := testEnv.List(ctx, machineSets, msListOpts...); err != nil {
 				return false
 			}
 			for _, ms := range machineSets.Items {
@@ -233,10 +229,10 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		secondMachineSet := machineSets.Items[0]
 		By("Scaling the MachineDeployment to 3 replicas")
 		modifyFunc := func(d *clusterv1.MachineDeployment) { d.Spec.Replicas = pointer.Int32Ptr(3) }
-		Expect(updateMachineDeployment(k8sClient, deployment, modifyFunc)).To(Succeed())
+		Expect(updateMachineDeployment(ctx, testEnv, deployment, modifyFunc)).To(Succeed())
 		Eventually(func() int {
 			key := client.ObjectKey{Name: secondMachineSet.Name, Namespace: secondMachineSet.Namespace}
-			if err := k8sClient.Get(ctx, key, &secondMachineSet); err != nil {
+			if err := testEnv.Get(ctx, key, &secondMachineSet); err != nil {
 				return -1
 			}
 			return int(*secondMachineSet.Spec.Replicas)
@@ -247,9 +243,9 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		//
 		By("Setting a label on the MachineDeployment")
 		modifyFunc = func(d *clusterv1.MachineDeployment) { d.Spec.Template.Labels["updated"] = "true" }
-		Expect(updateMachineDeployment(k8sClient, deployment, modifyFunc)).To(Succeed())
+		Expect(updateMachineDeployment(ctx, testEnv, deployment, modifyFunc)).To(Succeed())
 		Eventually(func() int {
-			if err := k8sClient.List(ctx, machineSets, msListOpts...); err != nil {
+			if err := testEnv.List(ctx, machineSets, msListOpts...); err != nil {
 				return -1
 			}
 			return len(machineSets.Items)
@@ -258,7 +254,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		// Verify that all the MachineSets have the expected OwnerRef.
 		By("Verifying MachineSet owner references")
 		Eventually(func() bool {
-			if err := k8sClient.List(ctx, machineSets, msListOpts...); err != nil {
+			if err := testEnv.List(ctx, machineSets, msListOpts...); err != nil {
 				return false
 			}
 			for i := 0; i < len(machineSets.Items); i++ {
@@ -286,7 +282,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 			// Set the all non-deleted machines as ready with a NodeRef, so the MachineSet controller can proceed
 			// to properly set AvailableReplicas.
 			foundMachines := &clusterv1.MachineList{}
-			Expect(k8sClient.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
+			Expect(testEnv.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
 			for i := 0; i < len(foundMachines.Items); i++ {
 				m := foundMachines.Items[i]
 				// Skip over deleted Machines
@@ -297,11 +293,11 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 				if !metav1.IsControlledBy(&m, thirdMachineSet) {
 					continue
 				}
-				fakeInfrastructureRefReady(m.Spec.InfrastructureRef, infraResource)
-				fakeMachineNodeRef(&m)
+				providerID := fakeInfrastructureRefReady(m.Spec.InfrastructureRef, infraResource)
+				fakeMachineNodeRef(&m, providerID)
 			}
 
-			if err := k8sClient.List(ctx, machineSets, msListOpts...); err != nil {
+			if err := testEnv.List(ctx, machineSets, msListOpts...); err != nil {
 				return -1
 			}
 			return len(machineSets.Items)
@@ -325,12 +321,12 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 			d.Spec.Selector.MatchLabels = newLabels
 			d.Spec.Template.Labels = newLabels
 		}
-		Expect(updateMachineDeployment(k8sClient, deployment, modifyFunc)).To(Succeed())
+		Expect(updateMachineDeployment(ctx, testEnv, deployment, modifyFunc)).To(Succeed())
 
 		By("Verifying if a new MachineSet with updated labels are created")
 		Eventually(func() int {
 			listOpts := client.MatchingLabels(newLabels)
-			if err := k8sClient.List(ctx, machineSets, listOpts); err != nil {
+			if err := testEnv.List(ctx, machineSets, listOpts); err != nil {
 				return -1
 			}
 			return len(machineSets.Items)
@@ -342,7 +338,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 			// Set the all non-deleted machines as ready with a NodeRef, so the MachineSet controller can proceed
 			// to properly set AvailableReplicas.
 			foundMachines := &clusterv1.MachineList{}
-			Expect(k8sClient.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
+			Expect(testEnv.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
 			for i := 0; i < len(foundMachines.Items); i++ {
 				m := foundMachines.Items[i]
 				if !m.DeletionTimestamp.IsZero() {
@@ -352,12 +348,12 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 				if !metav1.IsControlledBy(&m, &newms) {
 					continue
 				}
-				fakeInfrastructureRefReady(m.Spec.InfrastructureRef, infraResource)
-				fakeMachineNodeRef(&m)
+				providerID := fakeInfrastructureRefReady(m.Spec.InfrastructureRef, infraResource)
+				fakeMachineNodeRef(&m, providerID)
 			}
 
 			listOpts := client.MatchingLabels(newLabels)
-			if err := k8sClient.List(ctx, machineSets, listOpts); err != nil {
+			if err := testEnv.List(ctx, machineSets, listOpts); err != nil {
 				return false
 			}
 			return machineSets.Items[0].Status.Replicas == *deployment.Spec.Replicas
@@ -366,7 +362,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 		By("Verifying MachineSets with old labels are deleted")
 		Eventually(func() int {
 			listOpts := client.MatchingLabels(oldLabels)
-			if err := k8sClient.List(ctx, machineSets, listOpts); err != nil {
+			if err := testEnv.List(ctx, machineSets, listOpts); err != nil {
 				return -1
 			}
 
@@ -381,7 +377,7 @@ var _ = Describe("MachineDeployment Reconciler", func() {
 func TestMachineSetToDeployments(t *testing.T) {
 	g := NewWithT(t)
 
-	machineDeployment := clusterv1.MachineDeployment{
+	machineDeployment := &clusterv1.MachineDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "withMatchingLabels",
 			Namespace: "test",
@@ -396,12 +392,7 @@ func TestMachineSetToDeployments(t *testing.T) {
 		},
 	}
 
-	machineDeplopymentList := &clusterv1.MachineDeploymentList{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "MachineDeploymentList",
-		},
-		Items: []clusterv1.MachineDeployment{machineDeployment},
-	}
+	machineDeplopymentList := []client.Object{machineDeployment}
 
 	ms1 := clusterv1.MachineSet{
 		TypeMeta: metav1.TypeMeta{
@@ -411,7 +402,7 @@ func TestMachineSetToDeployments(t *testing.T) {
 			Name:      "withOwnerRef",
 			Namespace: "test",
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(&machineDeployment, machineDeploymentKind),
+				*metav1.NewControllerRef(machineDeployment, machineDeploymentKind),
 			},
 			Labels: map[string]string{
 				clusterv1.ClusterLabelName: "test-cluster",
@@ -446,31 +437,22 @@ func TestMachineSetToDeployments(t *testing.T) {
 
 	testsCases := []struct {
 		machineSet clusterv1.MachineSet
-		mapObject  handler.MapObject
+		mapObject  client.Object
 		expected   []reconcile.Request
 	}{
 		{
 			machineSet: ms1,
-			mapObject: handler.MapObject{
-				Meta:   ms1.GetObjectMeta(),
-				Object: &ms1,
-			},
-			expected: []reconcile.Request{},
+			mapObject:  &ms1,
+			expected:   []reconcile.Request{},
 		},
 		{
 			machineSet: ms2,
-			mapObject: handler.MapObject{
-				Meta:   ms2.GetObjectMeta(),
-				Object: &ms2,
-			},
-			expected: nil,
+			mapObject:  &ms2,
+			expected:   nil,
 		},
 		{
 			machineSet: ms3,
-			mapObject: handler.MapObject{
-				Meta:   ms3.GetObjectMeta(),
-				Object: &ms3,
-			},
+			mapObject:  &ms3,
 			expected: []reconcile.Request{
 				{NamespacedName: client.ObjectKey{Namespace: "test", Name: "withMatchingLabels"}},
 			},
@@ -479,8 +461,7 @@ func TestMachineSetToDeployments(t *testing.T) {
 
 	g.Expect(clusterv1.AddToScheme(scheme.Scheme)).To(Succeed())
 	r := &MachineDeploymentReconciler{
-		Client:   fake.NewFakeClientWithScheme(scheme.Scheme, machineDeplopymentList),
-		Log:      log.Log,
+		Client:   fake.NewFakeClientWithScheme(scheme.Scheme, machineDeplopymentList...),
 		recorder: record.NewFakeRecorder(32),
 	}
 
@@ -493,7 +474,7 @@ func TestMachineSetToDeployments(t *testing.T) {
 func TestGetMachineDeploymentsForMachineSet(t *testing.T) {
 	g := NewWithT(t)
 
-	machineDeployment := clusterv1.MachineDeployment{
+	machineDeployment := &clusterv1.MachineDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "withLabels",
 			Namespace: "test",
@@ -506,14 +487,8 @@ func TestGetMachineDeploymentsForMachineSet(t *testing.T) {
 			},
 		},
 	}
-	machineDeplopymentList := &clusterv1.MachineDeploymentList{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "MachineDeploymentList",
-		},
-		Items: []clusterv1.MachineDeployment{
-			machineDeployment,
-		},
-	}
+	machineDeploymentList := []client.Object{machineDeployment}
+
 	ms1 := clusterv1.MachineSet{
 		TypeMeta: metav1.TypeMeta{
 			Kind: "MachineSet",
@@ -537,31 +512,30 @@ func TestGetMachineDeploymentsForMachineSet(t *testing.T) {
 	}
 
 	testCases := []struct {
-		machineDeploymentList clusterv1.MachineDeploymentList
-		machineSet            clusterv1.MachineSet
-		expected              []*clusterv1.MachineDeployment
+		machineSet clusterv1.MachineSet
+		expected   []client.Object
 	}{
 		{
-			machineDeploymentList: *machineDeplopymentList,
-			machineSet:            ms1,
-			expected:              nil,
+			machineSet: ms1,
+			expected:   nil,
 		},
 		{
-			machineDeploymentList: *machineDeplopymentList,
-			machineSet:            ms2,
-			expected:              []*clusterv1.MachineDeployment{&machineDeployment},
+			machineSet: ms2,
+			expected:   []client.Object{machineDeployment},
 		},
 	}
 
 	g.Expect(clusterv1.AddToScheme(scheme.Scheme)).To(Succeed())
 	r := &MachineDeploymentReconciler{
-		Client:   fake.NewFakeClientWithScheme(scheme.Scheme, &ms1, &ms2, machineDeplopymentList),
-		Log:      log.Log,
+		Client:   fake.NewFakeClientWithScheme(scheme.Scheme, append(machineDeploymentList, &ms1, &ms2)...),
 		recorder: record.NewFakeRecorder(32),
 	}
 
 	for _, tc := range testCases {
-		got := r.getMachineDeploymentsForMachineSet(&tc.machineSet)
+		var got []client.Object
+		for _, x := range r.getMachineDeploymentsForMachineSet(ctx, &tc.machineSet) {
+			got = append(got, x)
+		}
 		g.Expect(got).To(Equal(tc.expected))
 	}
 }
@@ -676,17 +650,12 @@ func TestGetMachineSetsForDeployment(t *testing.T) {
 			},
 		},
 	}
-	machineSetList := &clusterv1.MachineSetList{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "MachineSetList",
-		},
-		Items: []clusterv1.MachineSet{
-			ms1,
-			ms2,
-			ms3,
-			ms4,
-			ms5,
-		},
+	machineSetList := []client.Object{
+		&ms1,
+		&ms2,
+		&ms3,
+		&ms4,
+		&ms5,
 	}
 
 	testCases := []struct {
@@ -697,7 +666,7 @@ func TestGetMachineSetsForDeployment(t *testing.T) {
 		{
 			name:              "matching ownerRef and labels",
 			machineDeployment: machineDeployment1,
-			expected:          []*clusterv1.MachineSet{&ms2, &ms3},
+			expected:          []*clusterv1.MachineSet{&ms3, &ms2},
 		},
 		{
 			name:              "no matching ownerRef, matching labels",
@@ -718,12 +687,11 @@ func TestGetMachineSetsForDeployment(t *testing.T) {
 			g.Expect(clusterv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 			r := &MachineDeploymentReconciler{
-				Client:   fake.NewFakeClientWithScheme(scheme.Scheme, machineSetList),
-				Log:      log.Log,
+				Client:   fake.NewFakeClientWithScheme(scheme.Scheme, machineSetList...),
 				recorder: record.NewFakeRecorder(32),
 			}
 
-			got, err := r.getMachineSetsForDeployment(&tc.machineDeployment)
+			got, err := r.getMachineSetsForDeployment(ctx, &tc.machineDeployment)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			g.Expect(got).To(HaveLen(len(tc.expected)))

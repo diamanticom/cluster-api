@@ -46,9 +46,12 @@ E2E_FRAMEWORK_DIR := test/framework
 CAPD_DIR := test/infrastructure/docker
 RELEASE_NOTES_BIN := bin/release-notes
 RELEASE_NOTES := $(TOOLS_DIR)/$(RELEASE_NOTES_BIN)
-LINK_CHECKER_BIN := bin/liche
-LINK_CHECKER := $(TOOLS_DIR)/$(LINK_CHECKER_BIN)
-CLUSTERCTL_E2E_DIR := cmd/clusterctl/test/e2e
+GO_APIDIFF_BIN := bin/go-apidiff
+GO_APIDIFF := $(TOOLS_DIR)/$(GO_APIDIFF_BIN)
+ENVSUBST_BIN := bin/envsubst
+ENVSUBST := $(TOOLS_DIR)/$(ENVSUBST_BIN)
+
+export PATH := $(abspath $(TOOLS_BIN_DIR)):$(PATH)
 
 # Binaries.
 # Need to use abspath so we can invoke these from subdirectories
@@ -56,6 +59,7 @@ KUSTOMIZE := $(abspath $(TOOLS_BIN_DIR)/kustomize)
 CONTROLLER_GEN := $(abspath $(TOOLS_BIN_DIR)/controller-gen)
 GOLANGCI_LINT := $(abspath $(TOOLS_BIN_DIR)/golangci-lint)
 CONVERSION_GEN := $(abspath $(TOOLS_BIN_DIR)/conversion-gen)
+ENVSUBST := $(abspath $(TOOLS_BIN_DIR)/envsubst)
 
 # Bindata.
 GOBINDATA := $(abspath $(TOOLS_BIN_DIR)/go-bindata)
@@ -63,7 +67,6 @@ GOBINDATA_CLUSTERCTL_DIR := cmd/clusterctl/config
 CLOUDINIT_PKG_DIR := bootstrap/kubeadm/internal/cloudinit
 CLOUDINIT_GENERATED := $(CLOUDINIT_PKG_DIR)/zz_generated.bindata.go
 CLOUDINIT_SCRIPT := $(CLOUDINIT_PKG_DIR)/kubeadm-bootstrap-script.sh
-CERTMANAGER_COMPONENTS_GENERATED_FILE := cert-manager.yaml
 
 # Define Docker related variables. Releases should modify and double check these vars.
 REGISTRY ?= gcr.io/$(shell gcloud config get-value project)
@@ -109,28 +112,23 @@ help:  ## Display this help
 ## --------------------------------------
 
 .PHONY: test
-test: ## Run tests
-	source ./scripts/fetch_ext_bins.sh; fetch_tools; setup_envs; go test -v ./...
+test: ## Run tests.
+	source ./scripts/fetch_ext_bins.sh; fetch_tools; setup_envs; go test -v ./... $(TEST_ARGS)
 
-.PHONY: test-integration
-test-integration: ## Run integration tests
-	source ./scripts/fetch_ext_bins.sh; fetch_tools; setup_envs; go test -v -tags=integration ./test/integration/...
+.PHONY: test-cover
+test-cover: ## Run tests with code coverage and code generate  reports
+	source ./scripts/fetch_ext_bins.sh; fetch_tools; setup_envs; go test -v -coverprofile=out/coverage.out ./... $(TEST_ARGS)
+	go tool cover -func=out/coverage.out -o out/coverage.txt
+	go tool cover -html=out/coverage.out -o out/coverage.html
 
-.PHONY: test-capd-e2e-full
-test-capd-e2e-full: ## Rebuild all manifests and all provider images then run the capd-e2es
-	$(MAKE) generate-manifests
-	$(MAKE) release-manifests
-	$(MAKE) test-capd-e2e-images
-
-.PHONY: test-capd-e2e-images
-test-capd-e2e-images: ## Rebuild all Cluster API provider images and run the capd-e2e tests
+.PHONY: docker-build-e2e
+docker-build-e2e: ## Rebuild all Cluster API provider images to be used in the e2e tests
 	make docker-build REGISTRY=gcr.io/k8s-staging-cluster-api PULL_POLICY=IfNotPresent
-	$(MAKE) test-capd-e2e
+	$(MAKE) -C test/infrastructure/docker docker-build REGISTRY=gcr.io/k8s-staging-cluster-api
 
-.PHONY: test-capd-e2e
-test-capd-e2e: ## Rebuild the docker provider and run the capd-e2e tests
-	$(MAKE) -C test/infrastructure/docker docker-build REGISTRY=gcr.io/k8s-staging-capi-docker
-	$(MAKE) -C test/infrastructure/docker run-e2e
+.PHONY: test-e2e
+test-e2e: ## Run the e2e tests
+	$(MAKE) -C test/e2e run
 
 ## --------------------------------------
 ## Binaries
@@ -138,15 +136,15 @@ test-capd-e2e: ## Rebuild the docker provider and run the capd-e2e tests
 
 .PHONY: manager-core
 manager-core: ## Build core manager binary
-	go build -o $(BIN_DIR)/manager sigs.k8s.io/cluster-api
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/manager sigs.k8s.io/cluster-api
 
 .PHONY: manager-kubeadm-bootstrap
 manager-kubeadm-bootstrap: ## Build kubeadm bootstrap manager
-	go build -o $(BIN_DIR)/kubeadm-bootstrap-manager sigs.k8s.io/cluster-api/bootstrap/kubeadm
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/kubeadm-bootstrap-manager sigs.k8s.io/cluster-api/bootstrap/kubeadm
 
 .PHONY: manager-kubeadm-control-plane
 manager-kubeadm-control-plane: ## Build kubeadm control plane manager
-	go build -o $(BIN_DIR)/kubeadm-control-plane-manager sigs.k8s.io/cluster-api/controlplane/kubeadm
+	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/kubeadm-control-plane-manager sigs.k8s.io/cluster-api/controlplane/kubeadm
 
 .PHONY: managers
 managers: ## Build all managers
@@ -157,9 +155,6 @@ managers: ## Build all managers
 .PHONY: clusterctl
 clusterctl: ## Build clusterctl binary
 	go build -ldflags "$(LDFLAGS)" -o bin/clusterctl sigs.k8s.io/cluster-api/cmd/clusterctl
-
-$(KUSTOMIZE): $(TOOLS_DIR)/go.mod # Build kustomize from tools folder.
-	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/kustomize sigs.k8s.io/kustomize/kustomize/v3
 
 $(CONTROLLER_GEN): $(TOOLS_DIR)/go.mod # Build controller-gen from tools folder.
 	cd $(TOOLS_DIR); go build -tags=tools -o $(BIN_DIR)/controller-gen sigs.k8s.io/controller-tools/cmd/controller-gen
@@ -176,8 +171,17 @@ $(GOBINDATA): $(TOOLS_DIR)/go.mod # Build go-bindata from tools folder.
 $(RELEASE_NOTES): $(TOOLS_DIR)/go.mod
 	cd $(TOOLS_DIR) && go build -tags=tools -o $(RELEASE_NOTES_BIN) ./release
 
-$(LINK_CHECKER): $(TOOLS_DIR)/go.mod
-	cd $(TOOLS_DIR) && go build -tags=tools -o $(LINK_CHECKER_BIN) github.com/raviqqe/liche
+$(GO_APIDIFF): $(TOOLS_DIR)/go.mod
+	cd $(TOOLS_DIR) && go build -tags=tools -o $(GO_APIDIFF_BIN) github.com/joelanford/go-apidiff
+
+$(ENVSUBST): $(TOOLS_DIR)/go.mod
+	cd $(TOOLS_DIR) && go build -tags=tools -o $(ENVSUBST_BIN) github.com/drone/envsubst/cmd/envsubst
+
+$(KUSTOMIZE): # Build kustomize from tools folder.
+	hack/ensure-kustomize.sh
+
+envsubst: $(ENVSUBST) ## Build a local copy of envsubst.
+kustomize: $(KUSTOMIZE) ## Build a local copy of kustomize.
 
 .PHONY: e2e-framework
 e2e-framework: ## Builds the CAPI e2e framework
@@ -198,6 +202,9 @@ lint-full: $(GOLANGCI_LINT) ## Run slower linters to detect possible issues
 	cd $(E2E_FRAMEWORK_DIR); $(GOLANGCI_LINT) run -v --fast=false
 	cd $(CAPD_DIR); $(GOLANGCI_LINT) run -v --fast=false
 
+apidiff: $(GO_APIDIFF) ## Check for API differences
+	$(GO_APIDIFF) $(shell git rev-parse origin/master) --print-compatible
+
 ## --------------------------------------
 ## Generate / Manifests
 ## --------------------------------------
@@ -210,7 +217,8 @@ generate: ## Generate code
 	$(MAKE) -C test/infrastructure/docker generate
 
 .PHONY: generate-go
-generate-go: ## Runs Go related generate targets
+generate-go: $(GOBINDATA) ## Runs Go related generate targets
+	go generate ./...
 	$(MAKE) generate-go-core
 	$(MAKE) generate-go-kubeadm-bootstrap
 	$(MAKE) generate-go-kubeadm-control-plane
@@ -221,6 +229,7 @@ generate-go-core: $(CONTROLLER_GEN) $(CONVERSION_GEN)
 		object:headerFile=./hack/boilerplate/boilerplate.generatego.txt \
 		paths=./api/... \
 		paths=./$(EXP_DIR)/api/... \
+		paths=./$(EXP_DIR)/addons/api/... \
 		paths=./cmd/clusterctl/...
 	$(CONVERSION_GEN) \
 		--input-dirs=./api/v1alpha2 \
@@ -249,10 +258,8 @@ generate-bindata: $(KUSTOMIZE) $(GOBINDATA) clean-bindata $(CLOUDINIT_GENERATED)
 	# Package manifest YAML into a single file.
 	mkdir -p $(GOBINDATA_CLUSTERCTL_DIR)/manifest/
 	$(KUSTOMIZE) build $(GOBINDATA_CLUSTERCTL_DIR)/crd > $(GOBINDATA_CLUSTERCTL_DIR)/manifest/clusterctl-api.yaml
-	# Fetch the cert-manager manifest
-	curl -sL https://github.com/jetstack/cert-manager/releases/download/v0.11.0/cert-manager.yaml > "$(GOBINDATA_CLUSTERCTL_DIR)/manifest/${CERTMANAGER_COMPONENTS_GENERATED_FILE}"
 	# Generate go-bindata, add boilerplate, then cleanup.
-	$(GOBINDATA) -mode=420 -modtime=1 -pkg=config -o=$(GOBINDATA_CLUSTERCTL_DIR)/zz_generated.bindata.go $(GOBINDATA_CLUSTERCTL_DIR)/manifest/
+	$(GOBINDATA) -mode=420 -modtime=1 -pkg=config -o=$(GOBINDATA_CLUSTERCTL_DIR)/zz_generated.bindata.go $(GOBINDATA_CLUSTERCTL_DIR)/manifest/ $(GOBINDATA_CLUSTERCTL_DIR)/assets
 	cat ./hack/boilerplate/boilerplate.generatego.txt $(GOBINDATA_CLUSTERCTL_DIR)/zz_generated.bindata.go > $(GOBINDATA_CLUSTERCTL_DIR)/manifest/manifests.go
 	cp $(GOBINDATA_CLUSTERCTL_DIR)/manifest/manifests.go $(GOBINDATA_CLUSTERCTL_DIR)/zz_generated.bindata.go
 	# Cleanup the manifest folder.
@@ -276,6 +283,8 @@ generate-core-manifests: $(CONTROLLER_GEN) ## Generate manifests for the core pr
 		paths=./controllers/... \
 		paths=./$(EXP_DIR)/api/... \
 		paths=./$(EXP_DIR)/controllers/... \
+		paths=./$(EXP_DIR)/addons/api/... \
+		paths=./$(EXP_DIR)/addons/controllers/... \
 		crd:crdVersions=v1 \
 		rbac:roleName=manager-role \
 		output:crd:dir=./config/crd/bases \
@@ -318,7 +327,6 @@ modules: ## Runs go mod to ensure modules are up to date.
 	go mod tidy
 	cd $(TOOLS_DIR); go mod tidy
 	$(MAKE) -C $(CAPD_DIR) modules
-	$(MAKE) -C $(CLUSTERCTL_E2E_DIR) modules
 
 ## --------------------------------------
 ## Docker
@@ -332,19 +340,19 @@ docker-build: ## Build the docker images for controller managers
 
 .PHONY: docker-build-core
 docker-build-core: ## Build the docker image for core controller manager
-	docker build --pull --build-arg ARCH=$(ARCH) . -t $(CONTROLLER_IMG)-$(ARCH):$(TAG)
+	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) --build-arg ldflags="$(LDFLAGS)" . -t $(CONTROLLER_IMG)-$(ARCH):$(TAG)
 	$(MAKE) set-manifest-image MANIFEST_IMG=$(CONTROLLER_IMG)-$(ARCH) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./config/manager/manager_image_patch.yaml"
 	$(MAKE) set-manifest-pull-policy TARGET_RESOURCE="./config/manager/manager_pull_policy.yaml"
 
 .PHONY: docker-build-kubeadm-bootstrap
 docker-build-kubeadm-bootstrap: ## Build the docker image for kubeadm bootstrap controller manager
-	docker build --pull --build-arg ARCH=$(ARCH) --build-arg package=./bootstrap/kubeadm . -t $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
+	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) --build-arg package=./bootstrap/kubeadm --build-arg ldflags="$(LDFLAGS)" . -t $(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH):$(TAG)
 	$(MAKE) set-manifest-image MANIFEST_IMG=$(KUBEADM_BOOTSTRAP_CONTROLLER_IMG)-$(ARCH) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./bootstrap/kubeadm/config/manager/manager_image_patch.yaml"
 	$(MAKE) set-manifest-pull-policy TARGET_RESOURCE="./bootstrap/kubeadm/config/manager/manager_pull_policy.yaml"
 
 .PHONY: docker-build-kubeadm-control-plane
 docker-build-kubeadm-control-plane: ## Build the docker image for kubeadm control plane controller manager
-	docker build --pull --build-arg ARCH=$(ARCH) --build-arg package=./controlplane/kubeadm . -t $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
+	DOCKER_BUILDKIT=1 docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) --build-arg package=./controlplane/kubeadm --build-arg ldflags="$(LDFLAGS)" . -t $(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH):$(TAG)
 	$(MAKE) set-manifest-image MANIFEST_IMG=$(KUBEADM_CONTROL_PLANE_CONTROLLER_IMG)-$(ARCH) MANIFEST_TAG=$(TAG) TARGET_RESOURCE="./controlplane/kubeadm/config/manager/manager_image_patch.yaml"
 	$(MAKE) set-manifest-pull-policy TARGET_RESOURCE="./controlplane/kubeadm/config/manager/manager_pull_policy.yaml"
 
@@ -442,7 +450,10 @@ release: clean-release ## Builds and push container images using the latest git 
 	$(MAKE) set-manifest-pull-policy PULL_POLICY=IfNotPresent TARGET_RESOURCE="./config/manager/manager_pull_policy.yaml"
 	$(MAKE) set-manifest-pull-policy PULL_POLICY=IfNotPresent TARGET_RESOURCE="./bootstrap/kubeadm/config/manager/manager_pull_policy.yaml"
 	$(MAKE) set-manifest-pull-policy PULL_POLICY=IfNotPresent TARGET_RESOURCE="./controlplane/kubeadm/config/manager/manager_pull_policy.yaml"
-	$(MAKE) release-manifests
+	## Build the manifests
+	$(MAKE) release-manifests clean-release-git
+	## Build the development manifests
+	$(MAKE) release-manifests-dev clean-release-git
 
 .PHONY: release-manifests
 release-manifests: $(RELEASE_DIR) $(KUSTOMIZE) ## Builds the manifests to publish with a release
@@ -460,6 +471,14 @@ release-manifests: $(RELEASE_DIR) $(KUSTOMIZE) ## Builds the manifests to publis
 	echo "---" >> $(RELEASE_DIR)/cluster-api-components.yaml
 	cat $(RELEASE_DIR)/control-plane-components.yaml >> $(RELEASE_DIR)/cluster-api-components.yaml
 
+.PHONY: release-manifests-dev
+release-manifests-dev: ## Builds the development manifests and copies them in the release folder
+	# Release CAPD components and add them to the release dir
+	$(MAKE) -C test/infrastructure/docker/ release
+	cp test/infrastructure/docker/out/infrastructure-components.yaml $(RELEASE_DIR)/infrastructure-components-development.yaml
+	# Adds CAPD templates
+	cp test/infrastructure/docker/templates/* $(RELEASE_DIR)/
+
 release-binaries: ## Builds the binaries to publish with a release
 	RELEASE_BINARY=./cmd/clusterctl GOOS=linux GOARCH=amd64 $(MAKE) release-binary
 	RELEASE_BINARY=./cmd/clusterctl GOOS=darwin GOARCH=amd64 $(MAKE) release-binary
@@ -472,12 +491,15 @@ release-binary: $(RELEASE_DIR)
 		-e GOARCH=$(GOARCH) \
 		-v "$$(pwd):/workspace$(DOCKER_VOL_OPTS)" \
 		-w /workspace \
-		golang:1.13.8 \
+		golang:1.15.2 \
 		go build -a -ldflags "$(LDFLAGS) -extldflags '-static'" \
 		-o $(RELEASE_DIR)/$(notdir $(RELEASE_BINARY))-$(GOOS)-$(GOARCH) $(RELEASE_BINARY)
 
 .PHONY: release-staging
 release-staging: ## Builds and push container images to the staging bucket.
+	docker pull docker.io/docker/dockerfile:experimental
+	docker pull docker.io/library/golang:1.15.2
+	docker pull gcr.io/distroless/static:latest
 	REGISTRY=$(STAGING_REGISTRY) $(MAKE) docker-build-all docker-push-all release-alias-tag
 
 RELEASE_ALIAS_TAG=$(PULL_BASE_REF)
@@ -500,7 +522,7 @@ EXAMPLE_PROVIDER_IMG ?= $(REGISTRY)/example-provider-controller
 
 .PHONY: docker-build-example-provider
 docker-build-example-provider: ## Build the docker image for example provider
-	docker build --pull --build-arg ARCH=$(ARCH) . -f ./cmd/example-provider/Dockerfile -t $(EXAMPLE_PROVIDER_IMG)-$(ARCH):$(TAG)
+	DOCKER_BUILDKIT=1 docker build --pull --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) . -f ./cmd/example-provider/Dockerfile -t $(EXAMPLE_PROVIDER_IMG)-$(ARCH):$(TAG)
 	sed -i'' -e 's@image: .*@image: '"${EXAMPLE_PROVIDER_IMG}-$(ARCH):$(TAG)"'@' ./config/ci/manager/manager_image_patch.yaml
 
 ## --------------------------------------
@@ -521,6 +543,10 @@ clean-bin: ## Remove all generated binaries
 clean-release: ## Remove the release folder
 	rm -rf $(RELEASE_DIR)
 
+.PHONY: clean-release-git
+clean-release-git: ## Restores the git files usually modified during a release
+	git restore ./*manager_image_patch.yaml ./*manager_pull_policy.yaml
+
 .PHONY: clean-book
 clean-book: ## Remove all generated GitBook files
 	rm -rf ./docs/book/_book
@@ -528,6 +554,11 @@ clean-book: ## Remove all generated GitBook files
 .PHONY: clean-bindata
 clean-bindata: ## Remove bindata generated folder
 	rm -rf $(GOBINDATA_CLUSTERCTL_DIR)/manifest
+
+.PHONY: clean-manifests ## Reset manifests in config directories back to master
+clean-manifests:
+	@read -p "WARNING: This will reset all config directories to local master. Press [ENTER] to continue."
+	git checkout master config bootstrap/kubeadm/config controlplane/kubeadm/config test/infrastructure/docker/config
 
 .PHONY: format-tiltfile
 format-tiltfile: ## Format Tiltfile
@@ -539,7 +570,6 @@ verify:
 	./hack/verify-doctoc.sh
 	./hack/verify-shellcheck.sh
 	./hack/verify-starlark.sh
-	$(MAKE) verify-book-links
 	$(MAKE) verify-modules
 	$(MAKE) verify-gen
 	$(MAKE) verify-docker-provider
@@ -568,9 +598,9 @@ verify-docker-provider:
 	cd $(CAPD_DIR); $(MAKE) verify
 
 .PHONY: verify-book-links
-verify-book-links: $(LINK_CHECKER)
-	 # Ignore localhost links and set concurrency to a reasonable number
-	$(LINK_CHECKER) -r docs/book -x "^https?://" -c 10
+verify-book-links:
+	$(MAKE) -C docs/book verify
+
 ## --------------------------------------
 ## Others / Utilities
 ## --------------------------------------
@@ -582,3 +612,4 @@ diagrams: ## Build proposal diagrams
 .PHONY: serve-book
 serve-book: ## Build and serve the book with live-reloading enabled
 	$(MAKE) -C docs/book serve
+

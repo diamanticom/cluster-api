@@ -20,12 +20,17 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"time"
 
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/etcdserver/etcdserverpb"
 	"google.golang.org/grpc"
+	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal/proxy"
 )
+
+// etcdTimeout is the maximum time any individual call to the etcd client through the backoff adapter will take.
+const etcdTimeout = 2 * time.Second
 
 // GRPCDial is a function that creates a connection to a given endpoint.
 type GRPCDial func(ctx context.Context, addr string) (net.Conn, error)
@@ -111,26 +116,30 @@ func pbMemberToMember(m *etcdserverpb.Member) *Member {
 	}
 }
 
-// NewEtcdClient creates a new etcd client with a custom dialer and is configuration with optional functions.
-func NewEtcdClient(endpoint string, dialer GRPCDial, tlsConfig *tls.Config) (*clientv3.Client, error) {
+// NewClient creates a new etcd client with a proxy, and a TLS configuration.
+func NewClient(ctx context.Context, endpoints []string, p proxy.Proxy, tlsConfig *tls.Config) (*Client, error) {
+	dialer, err := proxy.NewDialer(p)
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to create a dialer for etcd client")
+	}
+
 	etcdClient, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{endpoint},
+		Endpoints:   endpoints,
 		DialTimeout: etcdTimeout,
 		DialOptions: []grpc.DialOption{
 			grpc.WithBlock(), // block until the underlying connection is up
-			grpc.WithContextDialer(dialer),
+			grpc.WithContextDialer(dialer.DialContextWithAddr),
 		},
 		TLS: tlsConfig,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create etcd client")
 	}
-	etcdClient.Endpoints()
-	return etcdClient, nil
+
+	return newEtcdClient(ctx, etcdClient)
 }
 
-// NewClientWithEtcd configures our response formatter (Client) with an etcd client and endpoint.
-func NewClientWithEtcd(ctx context.Context, etcdClient etcd) (*Client, error) {
+func newEtcdClient(ctx context.Context, etcdClient etcd) (*Client, error) {
 	endpoints := etcdClient.Endpoints()
 	if len(endpoints) == 0 {
 		return nil, errors.New("etcd client was not configured with any endpoints")

@@ -29,11 +29,13 @@ import (
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
+	yaml "sigs.k8s.io/cluster-api/cmd/clusterctl/client/yamlprocessor"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/scheme"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// dummy test to document fakeClient usage
+// TestNewFakeClient is a fake test to document fakeClient usage
 func TestNewFakeClient(t *testing.T) {
 	// create a fake config with a provider named P1 and a variable named var
 	repository1Config := config.NewProvider("p1", "url", clusterctlv1.CoreProviderType)
@@ -49,7 +51,7 @@ func TestNewFakeClient(t *testing.T) {
 		WithFile("v1.0", "components.yaml", []byte("content"))
 
 	// create a fake cluster, eventually adding some existing runtime objects to it
-	cluster1 := newFakeCluster("cluster1", config1).
+	cluster1 := newFakeCluster(cluster.Kubeconfig{Path: "cluster1"}, config1).
 		WithObjs()
 
 	// create a new fakeClient that allows to execute tests on the fake config, the fake repositories and the fake cluster.
@@ -59,8 +61,9 @@ func TestNewFakeClient(t *testing.T) {
 }
 
 type fakeClient struct {
-	configClient   config.Client
-	clusters       map[string]cluster.Client
+	configClient config.Client
+	// mapping between kubeconfigPath/context with cluster client
+	clusters       map[cluster.Kubeconfig]cluster.Client
 	repositories   map[string]repository.Client
 	internalClient *clusterctlClient
 }
@@ -71,12 +74,16 @@ func (f fakeClient) GetProvidersConfig() ([]Provider, error) {
 	return f.internalClient.GetProvidersConfig()
 }
 
-func (f fakeClient) GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, targetNameSpace, watchingNamespace string) (Components, error) {
-	return f.internalClient.GetProviderComponents(provider, providerType, targetNameSpace, watchingNamespace)
+func (f fakeClient) GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, options ComponentsOptions) (Components, error) {
+	return f.internalClient.GetProviderComponents(provider, providerType, options)
 }
 
 func (f fakeClient) GetClusterTemplate(options GetClusterTemplateOptions) (Template, error) {
 	return f.internalClient.GetClusterTemplate(options)
+}
+
+func (f fakeClient) GetKubeconfig(options GetKubeconfigOptions) (string, error) {
+	return f.internalClient.GetKubeconfig(options)
 }
 
 func (f fakeClient) Init(options InitOptions) ([]Components, error) {
@@ -99,8 +106,16 @@ func (f fakeClient) PlanUpgrade(options PlanUpgradeOptions) ([]UpgradePlan, erro
 	return f.internalClient.PlanUpgrade(options)
 }
 
+func (f fakeClient) PlanCertManagerUpgrade(options PlanUpgradeOptions) (CertManagerUpgradePlan, error) {
+	return f.internalClient.PlanCertManagerUpgrade(options)
+}
+
 func (f fakeClient) ApplyUpgrade(options ApplyUpgradeOptions) error {
 	return f.internalClient.ApplyUpgrade(options)
+}
+
+func (f fakeClient) ProcessYAML(options ProcessYAMLOptions) (YamlPrinter, error) {
+	return f.internalClient.ProcessYAML(options)
 }
 
 // newFakeClient returns a clusterctl client that allows to execute tests on a set of fake config, fake repositories and fake clusters.
@@ -108,7 +123,7 @@ func (f fakeClient) ApplyUpgrade(options ApplyUpgradeOptions) error {
 func newFakeClient(configClient config.Client) *fakeClient {
 
 	fake := &fakeClient{
-		clusters:     map[string]cluster.Client{},
+		clusters:     map[cluster.Kubeconfig]cluster.Client{},
 		repositories: map[string]repository.Client{},
 	}
 
@@ -117,21 +132,23 @@ func newFakeClient(configClient config.Client) *fakeClient {
 		fake.configClient = newFakeConfig()
 	}
 
-	var clusterClientFactory = func(kubeconfig string) (cluster.Client, error) {
-		if _, ok := fake.clusters[kubeconfig]; !ok {
-			return nil, errors.Errorf("Cluster for kubeconfig %q does not exists.", kubeconfig)
+	var clusterClientFactory = func(i ClusterClientFactoryInput) (cluster.Client, error) {
+		// converting the client.Kubeconfig to cluster.Kubeconfig alias
+		k := cluster.Kubeconfig(i.Kubeconfig)
+		if _, ok := fake.clusters[k]; !ok {
+			return nil, errors.Errorf("Cluster for kubeconfig %q and/or context %q does not exist.", i.Kubeconfig.Path, i.Kubeconfig.Context)
 		}
-		return fake.clusters[kubeconfig], nil
+		return fake.clusters[k], nil
 	}
 
 	fake.internalClient, _ = newClusterctlClient("fake-config",
 		InjectConfig(fake.configClient),
 		InjectClusterClientFactory(clusterClientFactory),
-		InjectRepositoryFactory(func(provider config.Provider) (repository.Client, error) {
-			if _, ok := fake.repositories[provider.ManifestLabel()]; !ok {
-				return nil, errors.Errorf("Repository for kubeconfig %q does not exists.", provider.ManifestLabel())
+		InjectRepositoryFactory(func(input RepositoryClientFactoryInput) (repository.Client, error) {
+			if _, ok := fake.repositories[input.Provider.ManifestLabel()]; !ok {
+				return nil, errors.Errorf("Repository for kubeconfig %q does not exist.", input.Provider.ManifestLabel())
 			}
-			return fake.repositories[provider.ManifestLabel()], nil
+			return fake.repositories[input.Provider.ManifestLabel()], nil
 		}),
 	)
 
@@ -139,7 +156,8 @@ func newFakeClient(configClient config.Client) *fakeClient {
 }
 
 func (f *fakeClient) WithCluster(clusterClient cluster.Client) *fakeClient {
-	f.clusters[clusterClient.Kubeconfig()] = clusterClient
+	input := clusterClient.Kubeconfig()
+	f.clusters[input] = clusterClient
 	return f
 }
 
@@ -154,10 +172,11 @@ func (f *fakeClient) WithRepository(repositoryClient repository.Client) *fakeCli
 // newFakeCluster returns a fakeClusterClient that
 // internally uses a FakeProxy (based on the controller-runtime FakeClient).
 // You can use WithObjs to pre-load a set of runtime objects in the cluster.
-func newFakeCluster(kubeconfig string, configClient config.Client) *fakeClusterClient {
+func newFakeCluster(kubeconfig cluster.Kubeconfig, configClient config.Client) *fakeClusterClient {
 	fake := &fakeClusterClient{
 		kubeconfig:   kubeconfig,
 		repositories: map[string]repository.Client{},
+		certManager:  newFakeCertManagerClient(nil, nil),
 	}
 
 	fake.fakeProxy = test.NewFakeProxy()
@@ -165,7 +184,7 @@ func newFakeCluster(kubeconfig string, configClient config.Client) *fakeClusterC
 		return nil
 	}
 
-	fake.internalclient = cluster.New("", configClient,
+	fake.internalclient = cluster.New(kubeconfig, configClient,
 		cluster.InjectProxy(fake.fakeProxy),
 		cluster.InjectPollImmediateWaiter(pollImmediateWaiter),
 		cluster.InjectRepositoryFactory(func(provider config.Provider, configClient config.Client, options ...repository.Option) (repository.Client, error) {
@@ -175,35 +194,59 @@ func newFakeCluster(kubeconfig string, configClient config.Client) *fakeClusterC
 			return fake.repositories[provider.Name()], nil
 		}),
 	)
-
 	return fake
 }
 
+// newFakeCertManagerClient creates a new CertManagerClient
+// allows the caller to define which images are needed for the manager to run
+func newFakeCertManagerClient(imagesReturnImages []string, imagesReturnError error) *fakeCertManagerClient {
+	return &fakeCertManagerClient{
+		images:      imagesReturnImages,
+		imagesError: imagesReturnError,
+	}
+}
+
 type fakeCertManagerClient struct {
+	images          []string
+	imagesError     error
+	certManagerPlan cluster.CertManagerUpgradePlan
 }
 
 var _ cluster.CertManagerClient = &fakeCertManagerClient{}
 
-func (p *fakeCertManagerClient) EnsureWebhook() error {
-	// For unit test, we are not installing the cert-manager Webhook so we always return no error without doing additional steps.
+func (p *fakeCertManagerClient) EnsureInstalled() error {
 	return nil
 }
 
+func (p *fakeCertManagerClient) EnsureLatestVersion() error {
+	return nil
+}
+
+func (p *fakeCertManagerClient) PlanUpgrade() (cluster.CertManagerUpgradePlan, error) {
+	return p.certManagerPlan, nil
+}
+
 func (p *fakeCertManagerClient) Images() ([]string, error) {
-	// For unit test, we are not installing the cert-manager.
-	return nil, nil
+	return p.images, p.imagesError
+}
+
+func (p *fakeCertManagerClient) WithCertManagerPlan(plan CertManagerUpgradePlan) *fakeCertManagerClient {
+	p.certManagerPlan = cluster.CertManagerUpgradePlan(plan)
+	return p
 }
 
 type fakeClusterClient struct {
-	kubeconfig     string
-	fakeProxy      *test.FakeProxy
-	repositories   map[string]repository.Client
-	internalclient cluster.Client
+	kubeconfig      cluster.Kubeconfig
+	fakeProxy       *test.FakeProxy
+	fakeObjectMover cluster.ObjectMover
+	repositories    map[string]repository.Client
+	internalclient  cluster.Client
+	certManager     cluster.CertManagerClient
 }
 
 var _ cluster.Client = &fakeClusterClient{}
 
-func (f fakeClusterClient) Kubeconfig() string {
+func (f fakeClusterClient) Kubeconfig() cluster.Kubeconfig {
 	return f.kubeconfig
 }
 
@@ -212,7 +255,7 @@ func (f fakeClusterClient) Proxy() cluster.Proxy {
 }
 
 func (f *fakeClusterClient) CertManager() cluster.CertManagerClient {
-	return &fakeCertManagerClient{}
+	return f.certManager
 }
 
 func (f fakeClusterClient) ProviderComponents() cluster.ComponentsClient {
@@ -228,7 +271,10 @@ func (f fakeClusterClient) ProviderInstaller() cluster.ProviderInstaller {
 }
 
 func (f *fakeClusterClient) ObjectMover() cluster.ObjectMover {
-	return f.internalclient.ObjectMover()
+	if f.fakeObjectMover == nil {
+		return f.internalclient.ObjectMover()
+	}
+	return f.fakeObjectMover
 }
 
 func (f *fakeClusterClient) ProviderUpgrader() cluster.ProviderUpgrader {
@@ -239,7 +285,11 @@ func (f *fakeClusterClient) Template() cluster.TemplateClient {
 	return f.internalclient.Template()
 }
 
-func (f *fakeClusterClient) WithObjs(objs ...runtime.Object) *fakeClusterClient {
+func (f *fakeClusterClient) WorkloadCluster() cluster.WorkloadCluster {
+	return f.internalclient.WorkloadCluster()
+}
+
+func (f *fakeClusterClient) WithObjs(objs ...client.Object) *fakeClusterClient {
 	f.fakeProxy.WithObjs(objs...)
 	return f
 }
@@ -251,6 +301,16 @@ func (f *fakeClusterClient) WithProviderInventory(name string, providerType clus
 
 func (f *fakeClusterClient) WithRepository(repositoryClient repository.Client) *fakeClusterClient {
 	f.repositories[repositoryClient.Name()] = repositoryClient
+	return f
+}
+
+func (f *fakeClusterClient) WithObjectMover(mover cluster.ObjectMover) *fakeClusterClient {
+	f.fakeObjectMover = mover
+	return f
+}
+
+func (f *fakeClusterClient) WithCertManagerClient(client cluster.CertManagerClient) *fakeClusterClient {
+	f.certManager = client
 	return f
 }
 
@@ -311,6 +371,7 @@ func newFakeRepository(provider config.Provider, configClient config.Client) *fa
 		Provider:       provider,
 		configClient:   configClient,
 		fakeRepository: fakeRepository,
+		processor:      yaml.NewSimpleProcessor(),
 	}
 }
 
@@ -318,6 +379,7 @@ type fakeRepositoryClient struct {
 	config.Provider
 	configClient   config.Client
 	fakeRepository *test.FakeRepository
+	processor      yaml.Processor
 }
 
 var _ repository.Client = &fakeRepositoryClient{}
@@ -336,20 +398,22 @@ func (f fakeRepositoryClient) Components() repository.ComponentsClient {
 		provider:       f.Provider,
 		fakeRepository: f.fakeRepository,
 		configClient:   f.configClient,
+		processor:      f.processor,
 	}
 }
 
 func (f fakeRepositoryClient) Templates(version string) repository.TemplateClient {
-	// use a fakeComponentClient (instead of the internal client used in other fake objects) we can de deterministic on what is returned (e.g. avoid interferences from overrides)
+	// use a fakeTemplateClient (instead of the internal client used in other fake objects) we can de deterministic on what is returned (e.g. avoid interferences from overrides)
 	return &fakeTemplateClient{
 		version:               version,
 		fakeRepository:        f.fakeRepository,
 		configVariablesClient: f.configClient.Variables(),
+		processor:             f.processor,
 	}
 }
 
 func (f fakeRepositoryClient) Metadata(version string) repository.MetadataClient {
-	// use a fakeComponentClient (instead of the internal client used in other fake objects) we can de deterministic on what is returned (e.g. avoid interferences from overrides)
+	// use a fakeMetadataClient (instead of the internal client used in other fake objects) we can de deterministic on what is returned (e.g. avoid interferences from overrides)
 	return &fakeMetadataClient{
 		version:        version,
 		fakeRepository: f.fakeRepository,
@@ -386,6 +450,7 @@ type fakeTemplateClient struct {
 	version               string
 	fakeRepository        *test.FakeRepository
 	configVariablesClient config.VariablesClient
+	processor             yaml.Processor
 }
 
 func (f *fakeTemplateClient) Get(flavor, targetNamespace string, listVariablesOnly bool) (repository.Template, error) {
@@ -399,7 +464,13 @@ func (f *fakeTemplateClient) Get(flavor, targetNamespace string, listVariablesOn
 	if err != nil {
 		return nil, err
 	}
-	return repository.NewTemplate(content, f.configVariablesClient, targetNamespace, listVariablesOnly)
+	return repository.NewTemplate(repository.TemplateInput{
+		RawArtifact:           content,
+		ConfigVariablesClient: f.configVariablesClient,
+		Processor:             f.processor,
+		TargetNamespace:       targetNamespace,
+		ListVariablesOnly:     listVariablesOnly,
+	})
 }
 
 // fakeMetadataClient provides a super simple MetadataClient (e.g. without support for local overrides/embedded metadata)
@@ -428,18 +499,27 @@ type fakeComponentClient struct {
 	provider       config.Provider
 	fakeRepository *test.FakeRepository
 	configClient   config.Client
+	processor      yaml.Processor
 }
 
-func (f *fakeComponentClient) Get(version, targetNamespace, watchingNamespace string) (repository.Components, error) {
-	if version == "" {
-		version = f.fakeRepository.DefaultVersion()
+func (f *fakeComponentClient) Get(options repository.ComponentsOptions) (repository.Components, error) {
+	if options.Version == "" {
+		options.Version = f.fakeRepository.DefaultVersion()
 	}
 	path := f.fakeRepository.ComponentsPath()
 
-	content, err := f.fakeRepository.GetFile(version, path)
+	content, err := f.fakeRepository.GetFile(options.Version, path)
 	if err != nil {
 		return nil, err
 	}
 
-	return repository.NewComponents(f.provider, version, content, f.configClient, targetNamespace, watchingNamespace)
+	return repository.NewComponents(
+		repository.ComponentsInput{
+			Provider:     f.provider,
+			ConfigClient: f.configClient,
+			Processor:    f.processor,
+			RawYaml:      content,
+			Options:      options,
+		},
+	)
 }

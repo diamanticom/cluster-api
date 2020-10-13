@@ -17,24 +17,11 @@ limitations under the License.
 package repository
 
 import (
-	"fmt"
-
 	"github.com/pkg/errors"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
+	yaml "sigs.k8s.io/cluster-api/cmd/clusterctl/client/yamlprocessor"
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
-
-// TemplateOptions defines a set of well-know variables that all the cluster templates are expected to manage;
-// this set of variables defines a simple, day1 experience that will be made accessible via flags in the clusterctl CLI.
-// Please note that each provider/each template is allowed to add more variables, but additional variables are exposed
-// only via environment variables or the clusterctl configuration file.
-type TemplateOptions struct {
-	ClusterName       string
-	Namespace         string
-	KubernetesVersion string
-	ControlplaneCount int
-	WorkerCount       int
-}
 
 // TemplateClient has methods to work with cluster templates hosted on a provider repository.
 // Templates are yaml files to be used for creating a guest cluster.
@@ -48,18 +35,29 @@ type templateClient struct {
 	version               string
 	repository            Repository
 	configVariablesClient config.VariablesClient
+	processor             yaml.Processor
+}
+
+type TemplateClientInput struct {
+	version               string
+	provider              config.Provider
+	repository            Repository
+	configVariablesClient config.VariablesClient
+	processor             yaml.Processor
 }
 
 // Ensure templateClient implements the TemplateClient interface.
 var _ TemplateClient = &templateClient{}
 
-// newTemplateClient returns a templateClient.
-func newTemplateClient(provider config.Provider, version string, repository Repository, configVariablesClient config.VariablesClient) *templateClient {
+// newTemplateClient returns a templateClient. It uses the SimpleYamlProcessor
+// by default
+func newTemplateClient(input TemplateClientInput) *templateClient {
 	return &templateClient{
-		provider:              provider,
-		version:               version,
-		repository:            repository,
-		configVariablesClient: configVariablesClient,
+		provider:              input.provider,
+		version:               input.version,
+		repository:            input.repository,
+		configVariablesClient: input.configVariablesClient,
+		processor:             input.processor,
 	}
 }
 
@@ -73,19 +71,11 @@ func (c *templateClient) Get(flavor, targetNamespace string, listVariablesOnly b
 		return nil, errors.New("invalid arguments: please provide a targetNamespace")
 	}
 
-	// we are always reading templateClient for a well know version, that usually is
-	// the version of the provider installed in the management cluster.
 	version := c.version
-
-	// building template name according with the naming convention
-	name := "cluster-template"
-	if flavor != "" {
-		name = fmt.Sprintf("%s-%s", name, flavor)
-	}
-	name = fmt.Sprintf("%s.yaml", name)
+	name := c.processor.GetTemplateName(version, flavor)
 
 	// read the component YAML, reading the local override file if it exists, otherwise read from the provider repository
-	rawYaml, err := getLocalOverride(&newOverrideInput{
+	rawArtifact, err := getLocalOverride(&newOverrideInput{
 		configVariablesClient: c.configVariablesClient,
 		provider:              c.provider,
 		version:               version,
@@ -95,9 +85,9 @@ func (c *templateClient) Get(flavor, targetNamespace string, listVariablesOnly b
 		return nil, err
 	}
 
-	if rawYaml == nil {
+	if rawArtifact == nil {
 		log.V(5).Info("Fetching", "File", name, "Provider", c.provider.ManifestLabel(), "Version", version)
-		rawYaml, err = c.repository.GetFile(version, name)
+		rawArtifact, err = c.repository.GetFile(version, name)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to read %q from provider's repository %q", name, c.provider.ManifestLabel())
 		}
@@ -105,5 +95,5 @@ func (c *templateClient) Get(flavor, targetNamespace string, listVariablesOnly b
 		log.V(1).Info("Using", "Override", name, "Provider", c.provider.ManifestLabel(), "Version", version)
 	}
 
-	return NewTemplate(rawYaml, c.configVariablesClient, targetNamespace, listVariablesOnly)
+	return NewTemplate(TemplateInput{rawArtifact, c.configVariablesClient, c.processor, targetNamespace, listVariablesOnly})
 }

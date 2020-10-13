@@ -23,59 +23,13 @@ import (
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
 )
 
-// InitOptions carries the options supported by Init.
-type InitOptions struct {
-	// Kubeconfig file to use for accessing the management cluster. If empty, default discovery rules apply.
-	Kubeconfig string
-
-	// CoreProvider version (e.g. cluster-api:v0.3.0) to add to the management cluster. If unspecified, the
-	// cluster-api core provider's latest release is used.
-	CoreProvider string
-
-	// BootstrapProviders and versions (e.g. kubeadm:v0.3.0) to add to the management cluster.
-	// If unspecified, the kubeadm bootstrap provider's latest release is used.
-	BootstrapProviders []string
-
-	// InfrastructureProviders and versions (e.g. aws:v0.5.0) to add to the management cluster.
-	InfrastructureProviders []string
-
-	// ControlPlaneProviders and versions (e.g. kubeadm:v0.3.0) to add to the management cluster.
-	// If unspecified, the kubeadm control plane provider latest release is used.
-	ControlPlaneProviders []string
-
-	// TargetNamespace defines the namespace where the providers should be deployed. If unspecified, each provider
-	// will be installed in a provider's default namespace.
-	TargetNamespace string
-
-	// WatchingNamespace defines the namespace the providers should watch to reconcile Cluster API objects.
-	// If unspecified, the providers watches for Cluster API objects across all namespaces.
-	WatchingNamespace string
-
-	// LogUsageInstructions instructs the init command to print the usage instructions in case of first run.
-	LogUsageInstructions bool
-}
-
-// MoveOptions carries the options supported by move.
-type MoveOptions struct {
-	// FromKubeconfig defines the kubeconfig file to use for accessing the source management cluster. If empty,
-	// default rules for kubeconfig discovery will be used.
-	FromKubeconfig string
-
-	// ToKubeconfig defines the path to the kubeconfig file to use for accessing the target management cluster.
-	ToKubeconfig string
-
-	// Namespace where the objects describing the workload cluster exists. If unspecified, the current
-	// namespace will be used.
-	Namespace string
-}
-
 // Client is exposes the clusterctl high-level client library.
 type Client interface {
 	// GetProvidersConfig returns the list of providers configured for this instance of clusterctl.
 	GetProvidersConfig() ([]Provider, error)
 
-	// GetProviderComponents returns the provider components for a given provider, targetNamespace, watchingNamespace.
-	GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, targetNameSpace, watchingNamespace string) (Components, error)
+	// GetProviderComponents returns the provider components for a given provider with options including targetNamespace, watchingNamespace.
+	GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, options ComponentsOptions) (Components, error)
 
 	// Init initializes a management cluster by adding the requested list of providers.
 	Init(options InitOptions) ([]Components, error)
@@ -85,6 +39,9 @@ type Client interface {
 
 	// GetClusterTemplate returns a workload cluster template.
 	GetClusterTemplate(options GetClusterTemplateOptions) (Template, error)
+
+	// GetKubeconfig returns the kubeconfig of the workload cluster.
+	GetKubeconfig(options GetKubeconfigOptions) (string, error)
 
 	// Delete deletes providers from a management cluster.
 	Delete(options DeleteOptions) error
@@ -99,8 +56,25 @@ type Client interface {
 	//   - Upgrade to the latest version in the the v1alpha3 series: ....
 	PlanUpgrade(options PlanUpgradeOptions) ([]UpgradePlan, error)
 
+	// PlanCertManagerUpgrade returns a CertManagerUpgradePlan.
+	PlanCertManagerUpgrade(options PlanUpgradeOptions) (CertManagerUpgradePlan, error)
+
 	// ApplyUpgrade executes an upgrade plan.
 	ApplyUpgrade(options ApplyUpgradeOptions) error
+
+	// ProcessYAML provides a direct way to process a yaml and inspect its
+	// variables.
+	ProcessYAML(options ProcessYAMLOptions) (YamlPrinter, error)
+}
+
+// YamlPrinter exposes methods that prints the processed template and
+// variables.
+type YamlPrinter interface {
+	// Variables required by the template.
+	Variables() []string
+
+	// Yaml returns yaml defining all the cluster template objects as a byte array.
+	Yaml() ([]byte, error)
 }
 
 // clusterctlClient implements Client.
@@ -110,8 +84,21 @@ type clusterctlClient struct {
 	clusterClientFactory    ClusterClientFactory
 }
 
-type RepositoryClientFactory func(config.Provider) (repository.Client, error)
-type ClusterClientFactory func(string) (cluster.Client, error)
+// RepositoryClientFactoryInput represents the inputs required by the
+// RepositoryClientFactory
+type RepositoryClientFactoryInput struct {
+	Provider  Provider
+	Processor Processor
+}
+type RepositoryClientFactory func(RepositoryClientFactoryInput) (repository.Client, error)
+
+// ClusterClientFactoryInput reporesents the inputs required by the
+// ClusterClientFactory
+type ClusterClientFactoryInput struct {
+	Kubeconfig Kubeconfig
+	Processor  Processor
+}
+type ClusterClientFactory func(ClusterClientFactoryInput) (cluster.Client, error)
 
 // Ensure clusterctlClient implements Client.
 var _ Client = &clusterctlClient{}
@@ -176,16 +163,25 @@ func newClusterctlClient(path string, options ...Option) (*clusterctlClient, err
 	return client, nil
 }
 
-// defaultClusterFactory is a ClusterClientFactory func the uses the default client provided by the cluster low level library.
-func defaultClusterFactory(configClient config.Client) func(kubeconfig string) (cluster.Client, error) {
-	return func(kubeconfig string) (cluster.Client, error) {
-		return cluster.New(kubeconfig, configClient), nil
+// defaultRepositoryFactory is a RepositoryClientFactory func the uses the default client provided by the repository low level library.
+func defaultRepositoryFactory(configClient config.Client) RepositoryClientFactory {
+	return func(input RepositoryClientFactoryInput) (repository.Client, error) {
+		return repository.New(
+			input.Provider,
+			configClient,
+			repository.InjectYamlProcessor(input.Processor),
+		)
 	}
 }
 
-// defaultRepositoryFactory is a RepositoryClientFactory func the uses the default client provided by the repository low level library.
-func defaultRepositoryFactory(configClient config.Client) func(providerConfig config.Provider) (repository.Client, error) {
-	return func(providerConfig config.Provider) (repository.Client, error) {
-		return repository.New(providerConfig, configClient)
+// defaultClusterFactory is a ClusterClientFactory func the uses the default client provided by the cluster low level library.
+func defaultClusterFactory(configClient config.Client) ClusterClientFactory {
+	return func(input ClusterClientFactoryInput) (cluster.Client, error) {
+		return cluster.New(
+			// Kubeconfig is a type alias to cluster.Kubeconfig
+			cluster.Kubeconfig(input.Kubeconfig),
+			configClient,
+			cluster.InjectYamlProcessor(input.Processor),
+		), nil
 	}
 }

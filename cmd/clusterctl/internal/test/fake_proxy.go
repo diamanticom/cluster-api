@@ -22,19 +22,23 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	fakebootstrap "sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test/providers/bootstrap"
 	fakecontrolplane "sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test/providers/controlplane"
+	fakeexternal "sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test/providers/external"
 	fakeinfrastructure "sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test/providers/infrastructure"
+	addonsv1alpha3 "sigs.k8s.io/cluster-api/exp/addons/api/v1alpha3"
 	expv1 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type FakeProxy struct {
-	cs   client.Client
-	objs []runtime.Object
+	cs        client.Client
+	namespace string
+	objs      []client.Object
 }
 
 var (
@@ -46,15 +50,25 @@ func init() {
 	_ = clusterctlv1.AddToScheme(FakeScheme)
 	_ = clusterv1.AddToScheme(FakeScheme)
 	_ = expv1.AddToScheme(FakeScheme)
+	_ = addonsv1alpha3.AddToScheme(FakeScheme)
 	_ = apiextensionslv1.AddToScheme(FakeScheme)
 
 	_ = fakebootstrap.AddToScheme(FakeScheme)
 	_ = fakecontrolplane.AddToScheme(FakeScheme)
+	_ = fakeexternal.AddToScheme(FakeScheme)
 	_ = fakeinfrastructure.AddToScheme(FakeScheme)
 }
 
 func (f *FakeProxy) CurrentNamespace() (string, error) {
-	return "default", nil
+	return f.namespace, nil
+}
+
+func (f *FakeProxy) ValidateKubernetesVersion() error {
+	return nil
+}
+
+func (f *FakeProxy) GetConfig() (*rest.Config, error) {
+	return nil, nil
 }
 
 func (f *FakeProxy) NewClient() (client.Client, error) {
@@ -110,11 +124,18 @@ func (f *FakeProxy) ListResources(labels map[string]string, namespaces ...string
 }
 
 func NewFakeProxy() *FakeProxy {
-	return &FakeProxy{}
+	return &FakeProxy{
+		namespace: "default",
+	}
 }
 
-func (f *FakeProxy) WithObjs(objs ...runtime.Object) *FakeProxy {
+func (f *FakeProxy) WithObjs(objs ...client.Object) *FakeProxy {
 	f.objs = append(f.objs, objs...)
+	return f
+}
+
+func (f *FakeProxy) WithNamespace(n string) *FakeProxy {
+	f.namespace = n
 	return f
 }
 

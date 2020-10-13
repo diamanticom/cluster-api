@@ -269,6 +269,10 @@ func (u *providerUpgrader) createCustomPlan(coreProvider clusterctlv1.Provider, 
 			return nil, errors.Errorf("unable to complete that upgrade: the target version for the provider %s supports the %s API Version of Cluster API (contract), while the management group is using %s", upgradeItem.InstanceName(), contract, targetContract)
 		}
 
+		// Migrate the additional provider attributes to the upgrade item
+		// such as watching namespace.
+		upgradeItem.WatchedNamespace = provider.WatchedNamespace
+
 		upgradePlan.Providers = append(upgradePlan.Providers, upgradeItem)
 		upgradeInstanceNames.Insert(upgradeItem.InstanceName())
 	}
@@ -325,7 +329,12 @@ func (u *providerUpgrader) getUpgradeComponents(provider UpgradeItem) (repositor
 		return nil, err
 	}
 
-	components, err := providerRepository.Components().Get(provider.NextVersion, provider.Namespace, provider.WatchedNamespace)
+	options := repository.ComponentsOptions{
+		Version:           provider.NextVersion,
+		TargetNamespace:   provider.Namespace,
+		WatchingNamespace: provider.WatchedNamespace,
+	}
+	components, err := providerRepository.Components().Get(options)
 	if err != nil {
 		return nil, err
 	}
@@ -333,16 +342,11 @@ func (u *providerUpgrader) getUpgradeComponents(provider UpgradeItem) (repositor
 }
 
 func (u *providerUpgrader) doUpgrade(upgradePlan *UpgradePlan) error {
-	log := logf.Log
-	log.Info("Performing upgrade...")
-
 	for _, upgradeItem := range upgradePlan.Providers {
 		// If there is not a specified next version, skip it (we are already up-to-date).
 		if upgradeItem.NextVersion == "" {
 			continue
 		}
-
-		log.Info("Upgrading", "Provider", upgradeItem.InstanceName(), "CurrentVersion", upgradeItem.Version, "TargetVersion", upgradeItem.NextVersion)
 
 		// Gets the provider components for the target version.
 		components, err := u.getUpgradeComponents(upgradeItem)

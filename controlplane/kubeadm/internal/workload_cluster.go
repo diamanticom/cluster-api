@@ -18,6 +18,7 @@ package internal
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -31,31 +32,26 @@ import (
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
-	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal/etcd"
-	etcdutil "sigs.k8s.io/cluster-api/controlplane/kubeadm/internal/etcd/util"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/certs"
+	containerutil "sigs.k8s.io/cluster-api/util/container"
 	"sigs.k8s.io/cluster-api/util/patch"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	kubeProxyKey        = "kube-proxy"
-	labelNodeRoleMaster = "node-role.kubernetes.io/master"
+	kubeProxyKey              = "kube-proxy"
+	kubeadmConfigKey          = "kubeadm-config"
+	labelNodeRoleControlPlane = "node-role.kubernetes.io/master"
 )
 
 var (
 	ErrControlPlaneMinNodes = errors.New("cluster has fewer than 2 control plane nodes; removing an etcd member is not supported")
 )
-
-type etcdClientFor interface {
-	forNode(ctx context.Context, name string) (*etcd.Client, error)
-}
 
 // WorkloadCluster defines all behaviors necessary to upgrade kubernetes on a workload cluster
 type WorkloadCluster interface {
@@ -75,7 +71,12 @@ type WorkloadCluster interface {
 	UpdateCoreDNS(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane) error
 	RemoveEtcdMemberForMachine(ctx context.Context, machine *clusterv1.Machine) error
 	RemoveMachineFromKubeadmConfigMap(ctx context.Context, machine *clusterv1.Machine) error
+	RemoveNodeFromKubeadmConfigMap(ctx context.Context, nodeName string) error
 	ForwardEtcdLeadership(ctx context.Context, machine *clusterv1.Machine, leaderCandidate *clusterv1.Machine) error
+	AllowBootstrapTokensToGetNodes(ctx context.Context) error
+
+	// State recovery tasks.
+	ReconcileEtcdMembers(ctx context.Context) error
 }
 
 // Workload defines operations on workload clusters.
@@ -88,7 +89,7 @@ type Workload struct {
 func (w *Workload) getControlPlaneNodes(ctx context.Context) (*corev1.NodeList, error) {
 	nodes := &corev1.NodeList{}
 	labels := map[string]string{
-		labelNodeRoleMaster: "",
+		labelNodeRoleControlPlane: "",
 	}
 
 	if err := w.Client.List(ctx, nodes, ctrlclient.MatchingLabels(labels)); err != nil {
@@ -153,162 +154,6 @@ func (w *Workload) ControlPlaneIsHealthy(ctx context.Context) (HealthCheckResult
 	return response, nil
 }
 
-// removeMemberForNode removes the etcd member for the node. Removing the etcd
-// member when the cluster has one control plane node is not supported. To allow
-// the removal of a failed etcd member, the etcd API requests are sent to a
-// different node.
-func (w *Workload) removeMemberForNode(ctx context.Context, name string) error {
-	// Pick a different node to talk to etcd
-	controlPlaneNodes, err := w.getControlPlaneNodes(ctx)
-	if err != nil {
-		return err
-	}
-	if len(controlPlaneNodes.Items) < 2 {
-		return ErrControlPlaneMinNodes
-	}
-	anotherNode := firstNodeNotMatchingName(name, controlPlaneNodes.Items)
-	if anotherNode == nil {
-		return errors.Errorf("failed to find a control plane node whose name is not %s", name)
-	}
-	etcdClient, err := w.etcdClientGenerator.forNode(ctx, anotherNode.Name)
-	if err != nil {
-		return errors.Wrap(err, "failed to create etcd client")
-	}
-
-	// List etcd members. This checks that the member is healthy, because the request goes through consensus.
-	members, err := etcdClient.Members(ctx)
-	if err != nil {
-		return errors.Wrap(err, "failed to list etcd members using etcd client")
-	}
-	member := etcdutil.MemberForName(members, name)
-
-	// The member has already been removed, return immediately
-	if member == nil {
-		return nil
-	}
-
-	if err := etcdClient.RemoveMember(ctx, member.ID); err != nil {
-		return errors.Wrap(err, "failed to remove member from etcd")
-	}
-
-	return nil
-}
-
-// EtcdIsHealthy runs checks for every etcd member in the cluster to satisfy our definition of healthy.
-// This is a best effort check and nodes can become unhealthy after the check is complete. It is not a guarantee.
-// It's used a signal for if we should allow a target cluster to scale up, scale down or upgrade.
-// It returns a map of nodes checked along with an error for a given node.
-func (w *Workload) EtcdIsHealthy(ctx context.Context) (HealthCheckResult, error) {
-	var knownClusterID uint64
-	var knownMemberIDSet etcdutil.UInt64Set
-
-	controlPlaneNodes, err := w.getControlPlaneNodes(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	expectedMembers := 0
-	response := make(map[string]error)
-	for _, node := range controlPlaneNodes.Items {
-		name := node.Name
-		response[name] = nil
-		if node.Spec.ProviderID == "" {
-			response[name] = errors.New("empty provider ID")
-			continue
-		}
-
-		// Check to see if the pod is ready
-		etcdPodKey := ctrlclient.ObjectKey{
-			Namespace: metav1.NamespaceSystem,
-			Name:      staticPodName("etcd", name),
-		}
-		pod := corev1.Pod{}
-		if err := w.Client.Get(ctx, etcdPodKey, &pod); err != nil {
-			response[name] = errors.Wrap(err, "failed to get etcd pod")
-			continue
-		}
-		if err := checkStaticPodReadyCondition(pod); err != nil {
-			// Nothing wrong here, etcd on this node is just not running.
-			// If it's a true failure the healthcheck will fail since it won't have checked enough members.
-			continue
-		}
-		// Only expect a member reports healthy if its pod is ready.
-		// This fixes the known state where the control plane has a crash-looping etcd pod that is not part of the
-		// etcd cluster.
-		expectedMembers++
-
-		// Create the etcd Client for the etcd Pod scheduled on the Node
-		etcdClient, err := w.etcdClientGenerator.forNode(ctx, name)
-		if err != nil {
-			response[name] = errors.Wrap(err, "failed to create etcd client")
-			continue
-		}
-
-		// List etcd members. This checks that the member is healthy, because the request goes through consensus.
-		members, err := etcdClient.Members(ctx)
-		if err != nil {
-			response[name] = errors.Wrap(err, "failed to list etcd members using etcd client")
-			continue
-		}
-		member := etcdutil.MemberForName(members, name)
-
-		// Check that the member reports no alarms.
-		if len(member.Alarms) > 0 {
-			response[name] = errors.Errorf("etcd member reports alarms: %v", member.Alarms)
-			continue
-		}
-
-		// Check that the member belongs to the same cluster as all other members.
-		clusterID := member.ClusterID
-		if knownClusterID == 0 {
-			knownClusterID = clusterID
-		} else if knownClusterID != clusterID {
-			response[name] = errors.Errorf("etcd member has cluster ID %d, but all previously seen etcd members have cluster ID %d", clusterID, knownClusterID)
-			continue
-		}
-
-		// Check that the member list is stable.
-		memberIDSet := etcdutil.MemberIDSet(members)
-		if knownMemberIDSet.Len() == 0 {
-			knownMemberIDSet = memberIDSet
-		} else {
-			unknownMembers := memberIDSet.Difference(knownMemberIDSet)
-			if unknownMembers.Len() > 0 {
-				response[name] = errors.Errorf("etcd member reports members IDs %v, but all previously seen etcd members reported member IDs %v", memberIDSet.UnsortedList(), knownMemberIDSet.UnsortedList())
-			}
-			continue
-		}
-	}
-
-	// TODO: ensure that each pod is owned by a node that we're managing. That would ensure there are no out-of-band etcd members
-
-	// Check that there is exactly one etcd member for every healthy pod.
-	// This allows us to handle the expected case where there is a failing pod but it's been removed from the member list.
-	if expectedMembers != len(knownMemberIDSet) {
-		return response, errors.Errorf("there are %d healthy etcd pods, but %d etcd members", expectedMembers, len(knownMemberIDSet))
-	}
-
-	return response, nil
-}
-
-// UpdateEtcdVersionInKubeadmConfigMap sets the imageRepository or the imageTag or both in the kubeadm config map.
-func (w *Workload) UpdateEtcdVersionInKubeadmConfigMap(ctx context.Context, imageRepository, imageTag string) error {
-	configMapKey := ctrlclient.ObjectKey{Name: "kubeadm-config", Namespace: metav1.NamespaceSystem}
-	kubeadmConfigMap, err := w.getConfigMap(ctx, configMapKey)
-	if err != nil {
-		return err
-	}
-	config := &kubeadmConfig{ConfigMap: kubeadmConfigMap}
-	changed, err := config.UpdateEtcdMeta(imageRepository, imageTag)
-	if err != nil || !changed {
-		return err
-	}
-	if err := w.Client.Update(ctx, config.ConfigMap); err != nil {
-		return errors.Wrap(err, "error updating kubeadm ConfigMap")
-	}
-	return nil
-}
-
 // UpdateKubernetesVersionInKubeadmConfigMap updates the kubernetes version in the kubeadm config map.
 func (w *Workload) UpdateImageRepositoryInKubeadmConfigMap(ctx context.Context, imageRepository string) error {
 	configMapKey := ctrlclient.ObjectKey{Name: "kubeadm-config", Namespace: metav1.NamespaceSystem}
@@ -328,7 +173,7 @@ func (w *Workload) UpdateImageRepositoryInKubeadmConfigMap(ctx context.Context, 
 
 // UpdateKubernetesVersionInKubeadmConfigMap updates the kubernetes version in the kubeadm config map.
 func (w *Workload) UpdateKubernetesVersionInKubeadmConfigMap(ctx context.Context, version semver.Version) error {
-	configMapKey := ctrlclient.ObjectKey{Name: "kubeadm-config", Namespace: metav1.NamespaceSystem}
+	configMapKey := ctrlclient.ObjectKey{Name: kubeadmConfigKey, Namespace: metav1.NamespaceSystem}
 	kubeadmConfigMap, err := w.getConfigMap(ctx, configMapKey)
 	if err != nil {
 		return err
@@ -380,16 +225,6 @@ func (w *Workload) UpdateKubeletConfigMap(ctx context.Context, version semver.Ve
 	return nil
 }
 
-// RemoveEtcdMemberForMachine removes the etcd member from the target cluster's etcd cluster.
-func (w *Workload) RemoveEtcdMemberForMachine(ctx context.Context, machine *clusterv1.Machine) error {
-	if machine == nil || machine.Status.NodeRef == nil {
-		// Nothing to do, no node for Machine
-		return nil
-	}
-
-	return w.removeMemberForNode(ctx, machine.Status.NodeRef.Name)
-}
-
 // RemoveMachineFromKubeadmConfigMap removes the entry for the machine from the kubeadm configmap.
 func (w *Workload) RemoveMachineFromKubeadmConfigMap(ctx context.Context, machine *clusterv1.Machine) error {
 	if machine == nil || machine.Status.NodeRef == nil {
@@ -397,96 +232,28 @@ func (w *Workload) RemoveMachineFromKubeadmConfigMap(ctx context.Context, machin
 		return nil
 	}
 
-	configMapKey := ctrlclient.ObjectKey{Name: "kubeadm-config", Namespace: metav1.NamespaceSystem}
-	kubeadmConfigMap, err := w.getConfigMap(ctx, configMapKey)
-	if err != nil {
-		return err
-	}
-	config := &kubeadmConfig{ConfigMap: kubeadmConfigMap}
-	if err := config.RemoveAPIEndpoint(machine.Status.NodeRef.Name); err != nil {
-		return err
-	}
-	if err := w.Client.Update(ctx, config.ConfigMap); err != nil {
-		return errors.Wrap(err, "error updating kubeadm ConfigMap")
-	}
-	return nil
+	return w.RemoveNodeFromKubeadmConfigMap(ctx, machine.Status.NodeRef.Name)
 }
 
-// ReconcileKubeletRBACBinding will create a RoleBinding for the new kubelet version during upgrades.
-// If the role binding already exists this function is a no-op.
-func (w *Workload) ReconcileKubeletRBACBinding(ctx context.Context, version semver.Version) error {
-	roleName := fmt.Sprintf("kubeadm:kubelet-config-%d.%d", version.Major, version.Minor)
-	roleBinding := &rbacv1.RoleBinding{}
-	err := w.Client.Get(ctx, ctrlclient.ObjectKey{Name: roleName, Namespace: metav1.NamespaceSystem}, roleBinding)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return errors.Wrapf(err, "failed to determine if kubelet config rbac role binding %q already exists", roleName)
-	} else if err == nil {
-		// The required role binding already exists, nothing left to do
-		return nil
-	}
-
-	newRoleBinding := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      roleName,
-			Namespace: metav1.NamespaceSystem,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "Group",
-				Name:     "system:nodes",
-			},
-			{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "Group",
-				Name:     "system:bootstrappers:kubeadm:default-node-token",
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "Role",
-			Name:     roleName,
-		},
-	}
-	if err := w.Client.Create(ctx, newRoleBinding); err != nil && !apierrors.IsAlreadyExists(err) {
-		return errors.Wrapf(err, "failed to create kubelet rbac role binding %q", roleName)
-	}
-
-	return nil
-}
-
-// ReconcileKubeletRBACRole will create a Role for the new kubelet version during upgrades.
-// If the role already exists this function is a no-op.
-func (w *Workload) ReconcileKubeletRBACRole(ctx context.Context, version semver.Version) error {
-	majorMinor := fmt.Sprintf("%d.%d", version.Major, version.Minor)
-	roleName := fmt.Sprintf("kubeadm:kubelet-config-%s", majorMinor)
-	role := &rbacv1.Role{}
-	if err := w.Client.Get(ctx, ctrlclient.ObjectKey{Name: roleName, Namespace: metav1.NamespaceSystem}, role); err != nil && !apierrors.IsNotFound(err) {
-		return errors.Wrapf(err, "failed to determine if kubelet config rbac role %q already exists", roleName)
-	} else if err == nil {
-		// The required role already exists, nothing left to do
-		return nil
-	}
-
-	newRole := &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      roleName,
-			Namespace: metav1.NamespaceSystem,
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				Verbs:         []string{"get"},
-				APIGroups:     []string{""},
-				Resources:     []string{"configmaps"},
-				ResourceNames: []string{fmt.Sprintf("kubelet-config-%s", majorMinor)},
-			},
-		},
-	}
-	if err := w.Client.Create(ctx, newRole); err != nil && !apierrors.IsAlreadyExists(err) {
-		return errors.Wrapf(err, "failed to create kubelet rbac role %q", roleName)
-	}
-
-	return nil
+// RemoveNodeFromKubeadmConfigMap removes the entry for the node from the kubeadm configmap.
+func (w *Workload) RemoveNodeFromKubeadmConfigMap(ctx context.Context, name string) error {
+	return util.Retry(func() (bool, error) {
+		configMapKey := ctrlclient.ObjectKey{Name: kubeadmConfigKey, Namespace: metav1.NamespaceSystem}
+		kubeadmConfigMap, err := w.getConfigMap(ctx, configMapKey)
+		if err != nil {
+			Log.Error(err, "unable to get kubeadmConfigMap")
+			return false, nil
+		}
+		config := &kubeadmConfig{ConfigMap: kubeadmConfigMap}
+		if err := config.RemoveAPIEndpoint(name); err != nil {
+			return false, err
+		}
+		if err := w.Client.Update(ctx, config.ConfigMap); err != nil {
+			Log.Error(err, "error updating kubeadm ConfigMap")
+			return false, nil
+		}
+		return true, nil
+	}, 5)
 }
 
 // ClusterStatus holds stats information about the cluster.
@@ -518,75 +285,15 @@ func (w *Workload) ClusterStatus(ctx context.Context) (ClusterStatus, error) {
 	}
 
 	// find the kubeadm conifg
-	kubeadmConfigKey := ctrlclient.ObjectKey{
-		Name:      "kubeadm-config",
+	key := ctrlclient.ObjectKey{
+		Name:      kubeadmConfigKey,
 		Namespace: metav1.NamespaceSystem,
 	}
-	err = w.Client.Get(ctx, kubeadmConfigKey, &corev1.ConfigMap{})
+	err = w.Client.Get(ctx, key, &corev1.ConfigMap{})
 	// TODO: Consider if this should only return false if the error is IsNotFound.
 	// TODO: Consider adding a third state of 'unknown' when there is an error retrieving the config map.
 	status.HasKubeadmConfig = err == nil
 	return status, nil
-}
-
-// ForwardEtcdLeadership forwards etcd leadership to the first follower
-func (w *Workload) ForwardEtcdLeadership(ctx context.Context, machine *clusterv1.Machine, leaderCandidate *clusterv1.Machine) error {
-	if machine == nil || machine.Status.NodeRef == nil {
-		// Nothing to do, no node for Machine
-		return nil
-	}
-
-	// TODO we'd probably prefer to pass in all the known nodes and let grpc handle retrying connections across them
-	clientMachineName := machine.Status.NodeRef.Name
-	if leaderCandidate != nil && leaderCandidate.Status.NodeRef != nil {
-		// connect to the new leader candidate, in case machine's etcd membership has already been removed
-		clientMachineName = leaderCandidate.Status.NodeRef.Name
-	}
-
-	etcdClient, err := w.etcdClientGenerator.forNode(ctx, clientMachineName)
-	if err != nil {
-		return errors.Wrap(err, "failed to create etcd Client")
-	}
-
-	// List etcd members. This checks that the member is healthy, because the request goes through consensus.
-	members, err := etcdClient.Members(ctx)
-	if err != nil {
-		return errors.Wrap(err, "failed to list etcd members using etcd client")
-	}
-
-	currentMember := etcdutil.MemberForName(members, machine.Status.NodeRef.Name)
-	if currentMember == nil || currentMember.ID != etcdClient.LeaderID {
-		return nil
-	}
-
-	// Move the etcd client to the current leader, which in this case is the machine we're about to delete.
-	etcdClient, err = w.etcdClientGenerator.forNode(ctx, machine.Status.NodeRef.Name)
-	if err != nil {
-		return errors.Wrap(err, "failed to create etcd Client")
-	}
-
-	// If we don't have a leader candidate, move the leader to the next available machine.
-	if leaderCandidate == nil || leaderCandidate.Status.NodeRef == nil {
-		for _, member := range members {
-			if member.ID != currentMember.ID {
-				if err := etcdClient.MoveLeader(ctx, member.ID); err != nil {
-					return errors.Wrapf(err, "failed to move leader")
-				}
-				break
-			}
-		}
-		return nil
-	}
-
-	// Move the leader to the provided candidate.
-	nextLeader := etcdutil.MemberForName(members, leaderCandidate.Status.NodeRef.Name)
-	if nextLeader == nil {
-		return errors.Errorf("failed to get etcd member from node %q", leaderCandidate.Status.NodeRef.Name)
-	}
-	if err := etcdClient.MoveLeader(ctx, nextLeader.ID); err != nil {
-		return errors.Wrapf(err, "failed to move leader")
-	}
-	return nil
 }
 
 func generateClientCert(caCertEncoded, caKeyEncoded []byte) (tls.Certificate, error) {
@@ -609,7 +316,7 @@ func generateClientCert(caCertEncoded, caKeyEncoded []byte) (tls.Certificate, er
 	return tls.X509KeyPair(certs.EncodeCertPEM(x509Cert), certs.EncodePrivateKeyPEM(privKey))
 }
 
-func newClientCert(caCert *x509.Certificate, key *rsa.PrivateKey, caKey *rsa.PrivateKey) (*x509.Certificate, error) {
+func newClientCert(caCert *x509.Certificate, key *rsa.PrivateKey, caKey crypto.Signer) (*x509.Certificate, error) {
 	cfg := certs.Config{
 		CommonName: "cluster-api.x-k8s.io",
 	}
@@ -666,17 +373,13 @@ func checkNodeNoExecuteCondition(node corev1.Node) error {
 	return nil
 }
 
-func firstNodeNotMatchingName(name string, nodes []corev1.Node) *corev1.Node {
-	for _, n := range nodes {
-		if n.Name != name {
-			return &n
-		}
-	}
-	return nil
-}
-
 // UpdateKubeProxyImageInfo updates kube-proxy image in the kube-proxy DaemonSet.
 func (w *Workload) UpdateKubeProxyImageInfo(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane) error {
+	// Return early if we've been asked to skip kube-proxy upgrades entirely.
+	if _, ok := kcp.Annotations[controlplanev1.SkipKubeProxyAnnotation]; ok {
+		return nil
+	}
+
 	ds := &appsv1.DaemonSet{}
 
 	if err := w.Client.Get(ctx, ctrlclient.ObjectKey{Name: kubeProxyKey, Namespace: metav1.NamespaceSystem}, ds); err != nil {
@@ -692,13 +395,13 @@ func (w *Workload) UpdateKubeProxyImageInfo(ctx context.Context, kcp *controlpla
 		return nil
 	}
 
-	newImageName, err := util.ModifyImageTag(container.Image, kcp.Spec.Version)
+	newImageName, err := containerutil.ModifyImageTag(container.Image, kcp.Spec.Version)
 	if err != nil {
 		return err
 	}
 	if kcp.Spec.KubeadmConfigSpec.ClusterConfiguration != nil &&
 		kcp.Spec.KubeadmConfigSpec.ClusterConfiguration.ImageRepository != "" {
-		newImageName, err = util.ModifyImageRepository(newImageName, kcp.Spec.KubeadmConfigSpec.ClusterConfiguration.ImageRepository)
+		newImageName, err = containerutil.ModifyImageRepository(newImageName, kcp.Spec.KubeadmConfigSpec.ClusterConfiguration.ImageRepository)
 		if err != nil {
 			return err
 		}

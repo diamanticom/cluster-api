@@ -22,10 +22,13 @@ import (
 
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
-	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal"
+	bootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1alpha3"
+	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal/machinefilters"
 )
 
@@ -98,47 +101,41 @@ func TestHasDeletionTimestamp(t *testing.T) {
 	})
 }
 
-func TestMatchesConfigurationHash(t *testing.T) {
-	t.Run("machine with configuration hash returns true", func(t *testing.T) {
+func TestShouldRolloutAfter(t *testing.T) {
+	reconciliationTime := metav1.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
+	t.Run("if the machine is nil it returns false", func(t *testing.T) {
 		g := NewWithT(t)
-		m := &clusterv1.Machine{}
-		m.SetLabels(internal.ControlPlaneLabelsForClusterWithHash("test", "hashValue"))
-		g.Expect(machinefilters.MatchesConfigurationHash("hashValue")(m)).To(BeTrue())
+		g.Expect(machinefilters.ShouldRolloutAfter(&reconciliationTime, &reconciliationTime)(nil)).To(BeFalse())
 	})
-	t.Run("machine with wrong configuration hash returns false", func(t *testing.T) {
+	t.Run("if the reconciliationTime is nil it returns false", func(t *testing.T) {
 		g := NewWithT(t)
 		m := &clusterv1.Machine{}
-		m.SetLabels(internal.ControlPlaneLabelsForClusterWithHash("test", "notHashValue"))
-		g.Expect(machinefilters.MatchesConfigurationHash("hashValue")(m)).To(BeFalse())
+		g.Expect(machinefilters.ShouldRolloutAfter(nil, &reconciliationTime)(m)).To(BeFalse())
 	})
-	t.Run("machine without configuration hash returns false", func(t *testing.T) {
+	t.Run("if the rolloutAfter is nil it returns false", func(t *testing.T) {
 		g := NewWithT(t)
 		m := &clusterv1.Machine{}
-		g.Expect(machinefilters.MatchesConfigurationHash("hashValue")(m)).To(BeFalse())
+		g.Expect(machinefilters.ShouldRolloutAfter(&reconciliationTime, nil)(m)).To(BeFalse())
 	})
-}
-
-func TestOlderThan(t *testing.T) {
-	t.Run("machine with creation timestamp older than given returns true", func(t *testing.T) {
+	t.Run("if rolloutAfter is after the reconciliation time, return false", func(t *testing.T) {
 		g := NewWithT(t)
 		m := &clusterv1.Machine{}
-		m.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-1 * time.Hour)))
-		now := metav1.Now()
-		g.Expect(machinefilters.OlderThan(&now)(m)).To(BeTrue())
+		rolloutAfter := metav1.NewTime(reconciliationTime.Add(+1 * time.Hour))
+		g.Expect(machinefilters.ShouldRolloutAfter(&reconciliationTime, &rolloutAfter)(m)).To(BeFalse())
 	})
-	t.Run("machine with creation timestamp equal to given returns false", func(t *testing.T) {
+	t.Run("if rolloutAfter is before the reconciliation time and the machine was created before rolloutAfter, return true", func(t *testing.T) {
 		g := NewWithT(t)
 		m := &clusterv1.Machine{}
-		now := metav1.Now()
-		m.SetCreationTimestamp(now)
-		g.Expect(machinefilters.OlderThan(&now)(m)).To(BeFalse())
+		m.SetCreationTimestamp(metav1.NewTime(reconciliationTime.Add(-2 * time.Hour)))
+		rolloutAfter := metav1.NewTime(reconciliationTime.Add(-1 * time.Hour))
+		g.Expect(machinefilters.ShouldRolloutAfter(&reconciliationTime, &rolloutAfter)(m)).To(BeTrue())
 	})
-	t.Run("machine with creation timestamp after given returns false", func(t *testing.T) {
+	t.Run("if rolloutAfter is before the reconciliation time and the machine was created after rolloutAfter, return false", func(t *testing.T) {
 		g := NewWithT(t)
 		m := &clusterv1.Machine{}
-		m.SetCreationTimestamp(metav1.NewTime(time.Now().Add(+1 * time.Hour)))
-		now := metav1.Now()
-		g.Expect(machinefilters.OlderThan(&now)(m)).To(BeFalse())
+		m.SetCreationTimestamp(metav1.NewTime(reconciliationTime.Add(+1 * time.Hour)))
+		rolloutAfter := metav1.NewTime(reconciliationTime.Add(-1 * time.Hour))
+		g.Expect(machinefilters.ShouldRolloutAfter(&reconciliationTime, &rolloutAfter)(m)).To(BeFalse())
 	})
 }
 
@@ -197,4 +194,153 @@ func TestInFailureDomain(t *testing.T) {
 		m := &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: pointer.StringPtr("test")}}
 		g.Expect(machinefilters.InFailureDomains(pointer.StringPtr("foo"), pointer.StringPtr("test"))(m)).To(BeTrue())
 	})
+}
+
+func TestMatchesKubernetesVersion(t *testing.T) {
+	t.Run("nil machine returns false", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(machinefilters.MatchesKubernetesVersion("some_ver")(nil)).To(BeFalse())
+	})
+
+	t.Run("nil machine.Spec.Version returns false", func(t *testing.T) {
+		g := NewWithT(t)
+		machine := &clusterv1.Machine{
+			Spec: clusterv1.MachineSpec{
+				Version: nil,
+			},
+		}
+		g.Expect(machinefilters.MatchesKubernetesVersion("some_ver")(machine)).To(BeFalse())
+	})
+
+	t.Run("machine.Spec.Version returns true if matches", func(t *testing.T) {
+		g := NewWithT(t)
+		kversion := "some_ver"
+		machine := &clusterv1.Machine{
+			Spec: clusterv1.MachineSpec{
+				Version: &kversion,
+			},
+		}
+		g.Expect(machinefilters.MatchesKubernetesVersion("some_ver")(machine)).To(BeTrue())
+	})
+
+	t.Run("machine.Spec.Version returns false if does not match", func(t *testing.T) {
+		g := NewWithT(t)
+		kversion := "some_ver_2"
+		machine := &clusterv1.Machine{
+			Spec: clusterv1.MachineSpec{
+				Version: &kversion,
+			},
+		}
+		g.Expect(machinefilters.MatchesKubernetesVersion("some_ver")(machine)).To(BeFalse())
+	})
+}
+
+func TestMatchesTemplateClonedFrom(t *testing.T) {
+	t.Run("nil machine returns false", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(
+			machinefilters.MatchesTemplateClonedFrom(nil, nil)(nil),
+		).To(BeFalse())
+	})
+
+	t.Run("returns true if machine not found", func(t *testing.T) {
+		g := NewWithT(t)
+		kcp := &controlplanev1.KubeadmControlPlane{}
+		machine := &clusterv1.Machine{
+			Spec: clusterv1.MachineSpec{
+				InfrastructureRef: corev1.ObjectReference{
+					Kind:       "KubeadmConfig",
+					Namespace:  "default",
+					Name:       "test",
+					APIVersion: bootstrapv1.GroupVersion.String(),
+				},
+			},
+		}
+		g.Expect(
+			machinefilters.MatchesTemplateClonedFrom(map[string]*unstructured.Unstructured{}, kcp)(machine),
+		).To(BeTrue())
+	})
+}
+
+func TestMatchesTemplateClonedFrom_WithClonedFromAnnotations(t *testing.T) {
+	kcp := &controlplanev1.KubeadmControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+		},
+		Spec: controlplanev1.KubeadmControlPlaneSpec{
+			InfrastructureTemplate: corev1.ObjectReference{
+				Kind:       "GenericMachineTemplate",
+				Namespace:  "default",
+				Name:       "infra-foo",
+				APIVersion: "generic.io/v1",
+			},
+		},
+	}
+	machine := &clusterv1.Machine{
+		Spec: clusterv1.MachineSpec{
+			InfrastructureRef: corev1.ObjectReference{
+				APIVersion: "infrastructure.cluster.x-k8s.io/v1alpha3",
+				Kind:       "InfrastructureMachine",
+				Name:       "infra-config1",
+				Namespace:  "default",
+			},
+		},
+	}
+	tests := []struct {
+		name        string
+		annotations map[string]interface{}
+		expectMatch bool
+	}{
+		{
+			name:        "returns true if annotations don't exist",
+			annotations: map[string]interface{}{},
+			expectMatch: true,
+		},
+		{
+			name: "returns false if annotations don't match anything",
+			annotations: map[string]interface{}{
+				clusterv1.TemplateClonedFromNameAnnotation:      "barfoo1",
+				clusterv1.TemplateClonedFromGroupKindAnnotation: "barfoo2",
+			},
+			expectMatch: false,
+		},
+		{
+			name: "returns false if TemplateClonedFromNameAnnotation matches but TemplateClonedFromGroupKindAnnotation doesn't",
+			annotations: map[string]interface{}{
+				clusterv1.TemplateClonedFromNameAnnotation:      "infra-foo",
+				clusterv1.TemplateClonedFromGroupKindAnnotation: "barfoo2",
+			},
+			expectMatch: false,
+		},
+		{
+			name: "returns true if both annotations match",
+			annotations: map[string]interface{}{
+				clusterv1.TemplateClonedFromNameAnnotation:      "infra-foo",
+				clusterv1.TemplateClonedFromGroupKindAnnotation: "GenericMachineTemplate.generic.io",
+			},
+			expectMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			infraConfigs := map[string]*unstructured.Unstructured{
+				machine.Name: {
+					Object: map[string]interface{}{
+						"kind":       "InfrastructureMachine",
+						"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha3",
+						"metadata": map[string]interface{}{
+							"name":        "infra-config1",
+							"namespace":   "default",
+							"annotations": tt.annotations,
+						},
+					},
+				},
+			}
+			g.Expect(
+				machinefilters.MatchesTemplateClonedFrom(infraConfigs, kcp)(machine),
+			).To(Equal(tt.expectMatch))
+		})
+	}
 }

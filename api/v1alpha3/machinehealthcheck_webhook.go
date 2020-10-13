@@ -36,7 +36,18 @@ var (
 	// 10 minutes should allow the instance to start and the node to join the
 	// cluster on most providers.
 	defaultNodeStartupTimeout = metav1.Duration{Duration: 10 * time.Minute}
+	// Minimum time allowed for a node to start up
+	minNodeStartupTimeout = metav1.Duration{Duration: 30 * time.Second}
 )
+
+// SetMinNodeStartupTimeout allows users to optionally set a custom timeout
+// for the validation webhook.
+//
+// This function is mostly used within envtest (integration tests), and should
+// never be used in a production environment.
+func SetMinNodeStartupTimeout(d metav1.Duration) {
+	minNodeStartupTimeout = d
+}
 
 func (m *MachineHealthCheck) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
@@ -44,8 +55,8 @@ func (m *MachineHealthCheck) SetupWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:verbs=create;update,path=/validate-cluster-x-k8s-io-v1alpha3-machinehealthcheck,mutating=false,failurePolicy=fail,matchPolicy=Equivalent,groups=cluster.x-k8s.io,resources=machinehealthchecks,versions=v1alpha3,name=validation.machinehealthcheck.cluster.x-k8s.io
-// +kubebuilder:webhook:verbs=create;update,path=/mutate-cluster-x-k8s-io-v1alpha3-machinehealthcheck,mutating=true,failurePolicy=fail,matchPolicy=Equivalent,groups=cluster.x-k8s.io,resources=machinehealthchecks,versions=v1alpha3,name=default.machinehealthcheck.cluster.x-k8s.io
+// +kubebuilder:webhook:verbs=create;update,path=/validate-cluster-x-k8s-io-v1alpha3-machinehealthcheck,mutating=false,failurePolicy=fail,matchPolicy=Equivalent,groups=cluster.x-k8s.io,resources=machinehealthchecks,versions=v1alpha3,name=validation.machinehealthcheck.cluster.x-k8s.io,sideEffects=None,admissionReviewVersions=v1beta1
+// +kubebuilder:webhook:verbs=create;update,path=/mutate-cluster-x-k8s-io-v1alpha3-machinehealthcheck,mutating=true,failurePolicy=fail,matchPolicy=Equivalent,groups=cluster.x-k8s.io,resources=machinehealthchecks,versions=v1alpha3,name=default.machinehealthcheck.cluster.x-k8s.io,sideEffects=None,admissionReviewVersions=v1beta1
 
 var _ webhook.Defaulter = &MachineHealthCheck{}
 var _ webhook.Validator = &MachineHealthCheck{}
@@ -90,12 +101,26 @@ func (m *MachineHealthCheck) validate(old *MachineHealthCheck) error {
 	var allErrs field.ErrorList
 
 	// Validate selector parses as Selector
-	_, err := metav1.LabelSelectorAsSelector(&m.Spec.Selector)
+	selector, err := metav1.LabelSelectorAsSelector(&m.Spec.Selector)
 	if err != nil {
 		allErrs = append(
 			allErrs,
 			field.Invalid(field.NewPath("spec", "selector"), m.Spec.Selector, err.Error()),
 		)
+	}
+
+	// Validate that the selector isn't empty.
+	if selector != nil && selector.Empty() {
+		allErrs = append(
+			allErrs,
+			field.Invalid(field.NewPath("spec", "selector"), m.Spec.Selector, "selector must not be empty"),
+		)
+	}
+
+	if clusterName, ok := m.Spec.Selector.MatchLabels[ClusterLabelName]; ok && clusterName != m.Spec.ClusterName {
+		allErrs = append(
+			allErrs,
+			field.Invalid(field.NewPath("spec", "selector"), m.Spec.Selector, "cannot specify a cluster selector other than the one specified by ClusterName"))
 	}
 
 	if old != nil && old.Spec.ClusterName != m.Spec.ClusterName {
@@ -105,10 +130,10 @@ func (m *MachineHealthCheck) validate(old *MachineHealthCheck) error {
 		)
 	}
 
-	if m.Spec.NodeStartupTimeout != nil && m.Spec.NodeStartupTimeout.Seconds() < 30 {
+	if m.Spec.NodeStartupTimeout != nil && m.Spec.NodeStartupTimeout.Seconds() < minNodeStartupTimeout.Seconds() {
 		allErrs = append(
 			allErrs,
-			field.Invalid(field.NewPath("spec", "nodeStartupTimeout"), m.Spec.NodeStartupTimeout, "must be at least 30s"),
+			field.Invalid(field.NewPath("spec", "nodeStartupTimeout"), m.Spec.NodeStartupTimeout.Seconds(), "must be at least 30s"),
 		)
 	}
 
@@ -131,6 +156,5 @@ func (m *MachineHealthCheck) validate(old *MachineHealthCheck) error {
 	if len(allErrs) == 0 {
 		return nil
 	}
-
 	return apierrors.NewInvalid(GroupVersion.WithKind("MachineHealthCheck").GroupKind(), m.Name, allErrs)
 }

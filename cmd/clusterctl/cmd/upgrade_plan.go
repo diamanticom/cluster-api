@@ -26,7 +26,8 @@ import (
 )
 
 type upgradePlanOptions struct {
-	kubeconfig string
+	kubeconfig        string
+	kubeconfigContext string
 }
 
 var up = &upgradePlanOptions{}
@@ -56,6 +57,8 @@ var upgradePlanCmd = &cobra.Command{
 func init() {
 	upgradePlanCmd.Flags().StringVar(&up.kubeconfig, "kubeconfig", "",
 		"Path to the kubeconfig file to use for accessing the management cluster. If empty, default discovery rules apply.")
+	upgradePlanCmd.Flags().StringVar(&up.kubeconfigContext, "kubeconfig-context", "",
+		"Context to be used within the kubeconfig file. If empty, current context will be used.")
 }
 
 func runUpgradePlan() error {
@@ -64,20 +67,33 @@ func runUpgradePlan() error {
 		return err
 	}
 
-	upgradePlans, err := c.PlanUpgrade(client.PlanUpgradeOptions{
-		Kubeconfig: up.kubeconfig,
+	certManUpgradePlan, err := c.PlanCertManagerUpgrade(client.PlanUpgradeOptions{
+		Kubeconfig: client.Kubeconfig{Path: up.kubeconfig, Context: up.kubeconfigContext},
 	})
 	if err != nil {
 		return err
 	}
+	if certManUpgradePlan.ShouldUpgrade {
+		fmt.Printf("Cert-Manager will be upgraded from %q to %q\n\n", certManUpgradePlan.From, certManUpgradePlan.To)
+	} else {
+		fmt.Printf("Cert-Manager is already up to date\n\n")
+	}
 
-	// ensure upgrade plans are sorted consistently (by CoreProvider.Namespace, Contract).
-	sortUpgradePlans(upgradePlans)
+	upgradePlans, err := c.PlanUpgrade(client.PlanUpgradeOptions{
+		Kubeconfig: client.Kubeconfig{Path: up.kubeconfig, Context: up.kubeconfigContext},
+	})
+
+	if err != nil {
+		return err
+	}
 
 	if len(upgradePlans) == 0 {
 		fmt.Println("There are no management groups in the cluster. Please use clusterctl init to initialize a Cluster API management cluster.")
 		return nil
 	}
+
+	// ensure upgrade plans are sorted consistently (by CoreProvider.Namespace, Contract).
+	sortUpgradePlans(upgradePlans)
 
 	for _, plan := range upgradePlans {
 		// ensure provider are sorted consistently (by Type, Name, Namespace).
@@ -102,7 +118,7 @@ func runUpgradePlan() error {
 		if upgradeAvailable {
 			fmt.Println("You can now apply the upgrade by executing the following command:")
 			fmt.Println("")
-			fmt.Println(fmt.Sprintf("   upgrade apply --management-group %s --contract %s", plan.CoreProvider.InstanceName(), plan.Contract))
+			fmt.Printf("   upgrade apply --management-group %s --contract %s\n", plan.CoreProvider.InstanceName(), plan.Contract)
 		} else {
 			fmt.Println("You are already up to date!")
 		}

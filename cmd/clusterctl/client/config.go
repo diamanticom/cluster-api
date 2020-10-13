@@ -17,12 +17,18 @@ limitations under the License.
 package client
 
 import (
+	"io"
+	"io/ioutil"
 	"strconv"
+
+	"k8s.io/utils/pointer"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/version"
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
+	yaml "sigs.k8s.io/cluster-api/cmd/clusterctl/client/yamlprocessor"
 )
 
 func (c *clusterctlClient) GetProvidersConfig() ([]Provider, error) {
@@ -40,18 +46,81 @@ func (c *clusterctlClient) GetProvidersConfig() ([]Provider, error) {
 	return rr, nil
 }
 
-func (c *clusterctlClient) GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, targetNameSpace, watchingNamespace string) (Components, error) {
-	components, err := c.getComponentsByName(provider, providerType, targetNameSpace, watchingNamespace)
+func (c *clusterctlClient) GetProviderComponents(provider string, providerType clusterctlv1.ProviderType, options ComponentsOptions) (Components, error) {
+	// ComponentsOptions is an alias for repository.ComponentsOptions; this makes the conversion
+	inputOptions := repository.ComponentsOptions{
+		Version:           options.Version,
+		TargetNamespace:   options.TargetNamespace,
+		WatchingNamespace: options.WatchingNamespace,
+		SkipVariables:     options.SkipVariables,
+	}
+	components, err := c.getComponentsByName(provider, providerType, inputOptions)
 	if err != nil {
 		return nil, err
 	}
 	return components, nil
 }
 
+// ReaderSourceOptions define the options to be used when reading a template
+// from an arbitrary reader
+type ReaderSourceOptions struct {
+	Reader io.Reader
+}
+
+// ProcessYAMLOptions are the options supported by ProcessYAML.
+type ProcessYAMLOptions struct {
+	ReaderSource *ReaderSourceOptions
+	// URLSource to be used for reading the template
+	URLSource *URLSourceOptions
+
+	// ListVariablesOnly return the list of variables expected by the template
+	// without executing any further processing.
+	ListVariablesOnly bool
+}
+
+func (c *clusterctlClient) ProcessYAML(options ProcessYAMLOptions) (YamlPrinter, error) {
+	if options.ReaderSource != nil {
+		// NOTE: Beware of potentially reading in large files all at once
+		// since this is inefficient and increases memory utilziation.
+		content, err := ioutil.ReadAll(options.ReaderSource.Reader)
+		if err != nil {
+			return nil, err
+		}
+		return repository.NewTemplate(repository.TemplateInput{
+			RawArtifact:           content,
+			ConfigVariablesClient: c.configClient.Variables(),
+			Processor:             yaml.NewSimpleProcessor(),
+			TargetNamespace:       "",
+			ListVariablesOnly:     options.ListVariablesOnly,
+		})
+	}
+
+	// Technically we do not need to connect to the cluster. However, we are
+	// leveraging the template client which exposes GetFromURL() is available
+	// on the cluster client so we create a cluster client with default
+	// configs to access it.
+	cluster, err := c.clusterClientFactory(
+		ClusterClientFactoryInput{
+			// use the default kubeconfig
+			Kubeconfig: Kubeconfig{},
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if options.URLSource != nil {
+		return c.getTemplateFromURL(cluster, *options.URLSource, "", options.ListVariablesOnly)
+	}
+
+	return nil, errors.New("unable to read custom template. Please specify a template source")
+}
+
 // GetClusterTemplateOptions carries the options supported by GetClusterTemplate.
 type GetClusterTemplateOptions struct {
-	// Kubeconfig file to use for accessing the management cluster. If empty, default discovery rules apply.
-	Kubeconfig string
+	// Kubeconfig defines the kubeconfig to use for accessing the management cluster. If empty,
+	// default rules for kubeconfig discovery will be used.
+	Kubeconfig Kubeconfig
 
 	// ProviderRepositorySource to be used for reading the workload cluster template from a provider repository;
 	// only one template source can be used at time; if not other source will be set, a ProviderRepositorySource
@@ -76,14 +145,20 @@ type GetClusterTemplateOptions struct {
 	KubernetesVersion string
 
 	// ControlPlaneMachineCount defines the number of control plane machines to be added to the workload cluster.
-	ControlPlaneMachineCount int
+	// It can be set through the cli flag, CONTROL_PLANE_MACHINE_COUNT environment variable or will default to 1
+	ControlPlaneMachineCount *int64
 
 	// WorkerMachineCount defines number of worker machines to be added to the workload cluster.
-	WorkerMachineCount int
+	// It can be set through the cli flag, WORKER_MACHINE_COUNT environment variable or will default to 0
+	WorkerMachineCount *int64
 
-	// listVariablesOnly sets the GetClusterTemplate method to return the list of variables expected by the template
+	// ListVariablesOnly sets the GetClusterTemplate method to return the list of variables expected by the template
 	// without executing any further processing.
 	ListVariablesOnly bool
+
+	// YamlProcessor defines the yaml processor to use for the cluster
+	// template processing. If not defined, SimpleProcessor will be used.
+	YamlProcessor Processor
 }
 
 // numSources return the number of template sources currently set on a GetClusterTemplateOptions.
@@ -149,7 +224,7 @@ func (c *clusterctlClient) GetClusterTemplate(options GetClusterTemplateOptions)
 	}
 
 	// Gets  the client for the current management cluster
-	cluster, err := c.clusterClientFactory(options.Kubeconfig)
+	cluster, err := c.clusterClientFactory(ClusterClientFactoryInput{options.Kubeconfig, options.YamlProcessor})
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +248,7 @@ func (c *clusterctlClient) GetClusterTemplate(options GetClusterTemplateOptions)
 
 	// Gets the workload cluster template from the selected source
 	if options.ProviderRepositorySource != nil {
-		return c.getTemplateFromRepository(cluster, *options.ProviderRepositorySource, options.TargetNamespace, options.ListVariablesOnly)
+		return c.getTemplateFromRepository(cluster, options)
 	}
 	if options.ConfigMapSource != nil {
 		return c.getTemplateFromConfigMap(cluster, *options.ConfigMapSource, options.TargetNamespace, options.ListVariablesOnly)
@@ -186,14 +261,19 @@ func (c *clusterctlClient) GetClusterTemplate(options GetClusterTemplateOptions)
 }
 
 // getTemplateFromRepository returns a workload cluster template from a provider repository.
-func (c *clusterctlClient) getTemplateFromRepository(cluster cluster.Client, source ProviderRepositorySourceOptions, targetNamespace string, listVariablesOnly bool) (Template, error) {
+func (c *clusterctlClient) getTemplateFromRepository(cluster cluster.Client, options GetClusterTemplateOptions) (Template, error) {
+	source := *options.ProviderRepositorySource
+	targetNamespace := options.TargetNamespace
+	listVariablesOnly := options.ListVariablesOnly
+	processor := options.YamlProcessor
+
 	// If the option specifying the name of the infrastructure provider to get templates from is empty, try to detect it.
 	provider := source.InfrastructureProvider
 	ensureCustomResourceDefinitions := false
 	if provider == "" {
 		// ensure the custom resource definitions required by clusterctl are in place
 		if err := cluster.ProviderInventory().EnsureCustomResourceDefinitions(); err != nil {
-			return nil, errors.Wrapf(err, "failed to identify the default infrastructure provider. Please specify an infrastructure provider")
+			return nil, errors.Wrapf(err, "provider custom resource definitions (CRDs) are not installed")
 		}
 		ensureCustomResourceDefinitions = true
 
@@ -240,7 +320,7 @@ func (c *clusterctlClient) getTemplateFromRepository(cluster cluster.Client, sou
 		return nil, err
 	}
 
-	repo, err := c.repositoryClientFactory(providerConfig)
+	repo, err := c.repositoryClientFactory(RepositoryClientFactoryInput{Provider: providerConfig, Processor: processor})
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +366,7 @@ func (c *clusterctlClient) templateOptionsToVariables(options GetClusterTemplate
 	c.configClient.Variables().Set("NAMESPACE", options.TargetNamespace)
 
 	// the ClusterName, if valid, can be used in templates using the ${ CLUSTER_NAME } variable.
-	if err := validateDNS1123Label(options.ClusterName); err != nil {
+	if err := validateDNS1123Domanin(options.ClusterName); err != nil {
 		return errors.Wrapf(err, "invalid cluster name")
 	}
 	c.configClient.Variables().Set("CLUSTER_NAME", options.ClusterName)
@@ -302,16 +382,40 @@ func (c *clusterctlClient) templateOptionsToVariables(options GetClusterTemplate
 	}
 
 	// the ControlPlaneMachineCount, if valid, can be used in templates using the ${ CONTROL_PLANE_MACHINE_COUNT } variable.
-	if options.ControlPlaneMachineCount < 1 {
+	if options.ControlPlaneMachineCount == nil {
+		// Check if set through env variable and default to 1 otherwise
+		if v, err := c.configClient.Variables().Get("CONTROL_PLANE_MACHINE_COUNT"); err != nil {
+			options.ControlPlaneMachineCount = pointer.Int64Ptr(1)
+		} else {
+			i, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return errors.Errorf("invalid value for CONTROL_PLANE_MACHINE_COUNT set")
+			}
+			options.ControlPlaneMachineCount = &i
+		}
+	}
+	if *options.ControlPlaneMachineCount < 1 {
 		return errors.Errorf("invalid ControlPlaneMachineCount. Please use a number greater or equal than 1")
 	}
-	c.configClient.Variables().Set("CONTROL_PLANE_MACHINE_COUNT", strconv.Itoa(options.ControlPlaneMachineCount))
+	c.configClient.Variables().Set("CONTROL_PLANE_MACHINE_COUNT", strconv.FormatInt(*options.ControlPlaneMachineCount, 10))
 
 	// the WorkerMachineCount, if valid, can be used in templates using the ${ WORKER_MACHINE_COUNT } variable.
-	if options.WorkerMachineCount < 0 {
+	if options.WorkerMachineCount == nil {
+		// Check if set through env variable and default to 0 otherwise
+		if v, err := c.configClient.Variables().Get("WORKER_MACHINE_COUNT"); err != nil {
+			options.WorkerMachineCount = pointer.Int64Ptr(0)
+		} else {
+			i, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return errors.Errorf("invalid value for WORKER_MACHINE_COUNT set")
+			}
+			options.WorkerMachineCount = &i
+		}
+	}
+	if *options.WorkerMachineCount < 0 {
 		return errors.Errorf("invalid WorkerMachineCount. Please use a number greater or equal than 0")
 	}
-	c.configClient.Variables().Set("WORKER_MACHINE_COUNT", strconv.Itoa(options.WorkerMachineCount))
+	c.configClient.Variables().Set("WORKER_MACHINE_COUNT", strconv.FormatInt(*options.WorkerMachineCount, 10))
 
 	return nil
 }

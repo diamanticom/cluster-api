@@ -26,7 +26,7 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-logr/logr"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +34,7 @@ import (
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/integer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
+	"sigs.k8s.io/cluster-api/util/conversion"
 )
 
 const (
@@ -139,11 +140,18 @@ func Revision(obj runtime.Object) (int64, error) {
 }
 
 var annotationsToSkip = map[string]bool{
-	v1.LastAppliedConfigAnnotation:      true,
+	corev1.LastAppliedConfigAnnotation:  true,
 	clusterv1.RevisionAnnotation:        true,
 	clusterv1.RevisionHistoryAnnotation: true,
 	clusterv1.DesiredReplicasAnnotation: true,
 	clusterv1.MaxReplicasAnnotation:     true,
+
+	// Exclude the conversion annotation, to avoid infinite loops between the conversion webhook
+	// and the MachineDeployment controller syncing the annotations between a MachineDeployment
+	// and its linked MachineSets.
+	//
+	// See https://github.com/kubernetes-sigs/cluster-api/pull/3010#issue-413767831 for more details.
+	conversion.DataAnnotation: true,
 }
 
 // skipCopyAnnotation returns true if we should skip copying the annotation with the given annotation key
@@ -185,7 +193,7 @@ func getIntFromAnnotation(ms *clusterv1.MachineSet, annotationKey string, logger
 	if !ok {
 		return int32(0), false
 	}
-	intValue, err := strconv.Atoi(annotationValue)
+	intValue, err := strconv.ParseInt(annotationValue, 10, 32)
 	if err != nil {
 		logger.V(2).Info("Cannot convert the value to integer", "annotationValue", annotationValue)
 		return int32(0), false
@@ -555,7 +563,7 @@ func IsSaturated(deployment *clusterv1.MachineDeployment, ms *clusterv1.MachineS
 		return false
 	}
 	desiredString := ms.Annotations[clusterv1.DesiredReplicasAnnotation]
-	desired, err := strconv.Atoi(desiredString)
+	desired, err := strconv.ParseInt(desiredString, 10, 32)
 	if err != nil {
 		return false
 	}

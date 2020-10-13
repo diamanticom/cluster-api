@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	"github.com/coredns/corefile-migration/migration"
-	"github.com/docker/distribution/reference"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +29,7 @@ import (
 	kubeadmv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/types/v1beta1"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/util"
+	containerutil "sigs.k8s.io/cluster-api/util/container"
 	"sigs.k8s.io/cluster-api/util/patch"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -68,10 +68,16 @@ type coreDNSInfo struct {
 // UpdateCoreDNS updates the kubeadm configmap, coredns corefile and coredns
 // deployment.
 func (w *Workload) UpdateCoreDNS(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane) error {
+	// Return early if we've been asked to skip CoreDNS upgrades entirely.
+	if _, ok := kcp.Annotations[controlplanev1.SkipCoreDNSAnnotation]; ok {
+		return nil
+	}
+
 	// Return early if the configuration is nil.
 	if kcp.Spec.KubeadmConfigSpec.ClusterConfiguration == nil {
 		return nil
 	}
+
 	clusterConfig := kcp.Spec.KubeadmConfigSpec.ClusterConfiguration
 	// Return early if the type is anything other than empty (default), or CoreDNS.
 	if clusterConfig.DNS.Type != "" && clusterConfig.DNS.Type != kubeadmv1.CoreDNS {
@@ -143,30 +149,29 @@ func (w *Workload) getCoreDNSInfo(ctx context.Context, clusterConfig *kubeadmv1.
 	}
 
 	// Parse container image.
-	parsedImage, err := reference.ParseNormalizedNamed(container.Image)
+	parsedImage, err := containerutil.ImageFromString(container.Image)
 	if err != nil {
 		return nil, errors.Wrapf(err, "unable to parse %q deployment image", container.Image)
 	}
 
 	// Handle imageRepository.
-	toImageRepository := fmt.Sprintf("%s/%s", reference.Domain(parsedImage), reference.Path(parsedImage))
+	toImageRepository := fmt.Sprintf("%s/%s", parsedImage.Repository, parsedImage.Name)
 	if clusterConfig.ImageRepository != "" {
-		toImageRepository = fmt.Sprintf("%s/%s", clusterConfig.ImageRepository, reference.Path(parsedImage))
+		toImageRepository = fmt.Sprintf("%s/%s", clusterConfig.ImageRepository, coreDNSKey)
 	}
 	if clusterConfig.DNS.ImageRepository != "" {
-		toImageRepository = fmt.Sprintf("%s/%s", clusterConfig.DNS.ImageRepository, reference.Path(parsedImage))
+		toImageRepository = fmt.Sprintf("%s/%s", clusterConfig.DNS.ImageRepository, coreDNSKey)
 	}
 
 	// Handle imageTag.
-	imageRefTag, ok := parsedImage.(reference.Tagged)
-	if !ok {
+	if parsedImage.Tag == "" {
 		return nil, errors.Errorf("failed to update coredns deployment: does not have a valid image tag: %q", container.Image)
 	}
-	currentMajorMinorPatch, err := extractImageVersion(imageRefTag.Tag())
+	currentMajorMinorPatch, err := extractImageVersion(parsedImage.Tag)
 	if err != nil {
 		return nil, err
 	}
-	toImageTag := imageRefTag.Tag()
+	toImageTag := parsedImage.Tag
 	if clusterConfig.DNS.ImageTag != "" {
 		toImageTag = clusterConfig.DNS.ImageTag
 	}
@@ -180,7 +185,7 @@ func (w *Workload) getCoreDNSInfo(ctx context.Context, clusterConfig *kubeadmv1.
 		Deployment:             deployment,
 		CurrentMajorMinorPatch: currentMajorMinorPatch,
 		TargetMajorMinorPatch:  targetMajorMinorPatch,
-		FromImageTag:           imageRefTag.Tag(),
+		FromImageTag:           parsedImage.Tag,
 		ToImageTag:             toImageTag,
 		FromImage:              container.Image,
 		ToImage:                fmt.Sprintf("%s:%s", toImageRepository, toImageTag),
@@ -204,7 +209,7 @@ func (w *Workload) updateCoreDNSDeployment(ctx context.Context, info *coreDNSInf
 
 // UpdateCoreDNSImageInfoInKubeadmConfigMap updates the kubernetes version in the kubeadm config map.
 func (w *Workload) updateCoreDNSImageInfoInKubeadmConfigMap(ctx context.Context, dns *kubeadmv1.DNS) error {
-	configMapKey := ctrlclient.ObjectKey{Name: "kubeadm-config", Namespace: metav1.NamespaceSystem}
+	configMapKey := ctrlclient.ObjectKey{Name: kubeadmConfigKey, Namespace: metav1.NamespaceSystem}
 	kubeadmConfigMap, err := w.getConfigMap(ctx, configMapKey)
 	if err != nil {
 		return err

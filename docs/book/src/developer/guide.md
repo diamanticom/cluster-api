@@ -20,14 +20,14 @@ Other providers may have additional steps you need to follow to get up and runni
 ### Docker
 
 Iterating on the cluster API involves repeatedly building Docker containers.
-You'll need the [docker daemon][docker] available.
+You'll need the [docker daemon][docker] v19.03 or newer available.
 
 [docker]: https://docs.docker.com/install/
 
 ### A Cluster
 
 You'll likely want an existing cluster as your [management cluster][mcluster].
-The easiest way to do this is with [kind], as explained in the quick start.
+The easiest way to do this is with [kind] v0.7 or newer, as explained in the quick start.
 
 Make sure your cluster is set as the default for `kubectl`.
 If it's not, you will need to modify subsequent `kubectl` commands below.
@@ -61,6 +61,24 @@ There is a version of `kustomize` built into kubectl, but it does not have all t
 You'll need to [install `kubebuilder`][kubebuilder].
 
 [kubebuilder]: https://book.kubebuilder.io/quick-start.html#installation
+
+### Cert-Manager
+
+You'll need to deploy [cert-manager] components on your [management cluster][mcluster], using `kubectl`
+
+```bash
+kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v0.11.0/cert-manager.yaml
+```
+
+Ensure the cert-manager webhook service is ready before creating the Cluster API components. 
+
+This can be done by running: 
+
+```bash
+kubectl wait --for=condition=Available --timeout=300s apiservice v1beta1.webhook.cert-manager.io
+```
+
+[cert-manager]: https://github.com/jetstack/cert-manager
 
 ## Development
 
@@ -115,7 +133,7 @@ and
 
 ```
 $EDITOR config/manager/manager_image_patch.yaml
-$EDITOR
+$EDITOR test/infrastructure/docker/config/manager/manager_image_patch.yaml
 ```
 
 In both cases, change the `- image:` url to the digest URL mentioned above:
@@ -149,6 +167,7 @@ clusterrole.rbac.authorization.k8s.io/capi-manager-role configured
 rolebinding.rbac.authorization.k8s.io/capi-leader-election-rolebinding configured
 clusterrolebinding.rbac.authorization.k8s.io/capi-manager-rolebinding configured
 deployment.apps/capi-controller-manager created
+
 $ kustomize build test/infrastructure/docker/config | kubectl apply -f -
 namespace/capd-system configured
 customresourcedefinition.apiextensions.k8s.io/dockerclusters.infrastructure.cluster.x-k8s.io configured

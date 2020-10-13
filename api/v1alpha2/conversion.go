@@ -51,6 +51,8 @@ func (src *Cluster) ConvertTo(dstRaw conversion.Hub) error {
 	dst.Status.ControlPlaneReady = restored.Status.ControlPlaneReady
 	dst.Status.FailureDomains = restored.Status.FailureDomains
 	dst.Spec.Paused = restored.Spec.Paused
+	dst.Status.Conditions = restored.Status.Conditions
+	dst.Status.ObservedGeneration = restored.Status.ObservedGeneration
 
 	return nil
 }
@@ -115,6 +117,8 @@ func (src *Machine) ConvertTo(dstRaw conversion.Hub) error {
 		return err
 	}
 	restoreMachineSpec(&restored.Spec, &dst.Spec)
+	dst.Status.ObservedGeneration = restored.Status.ObservedGeneration
+	dst.Status.Conditions = restored.Status.Conditions
 
 	return nil
 }
@@ -125,6 +129,7 @@ func restoreMachineSpec(restored *v1alpha3.MachineSpec, dst *v1alpha3.MachineSpe
 	}
 	dst.Bootstrap.DataSecretName = restored.Bootstrap.DataSecretName
 	dst.FailureDomain = restored.FailureDomain
+	dst.NodeDrainTimeout = restored.NodeDrainTimeout
 }
 
 func (dst *Machine) ConvertFrom(srcRaw conversion.Hub) error {
@@ -172,6 +177,11 @@ func (src *MachineSet) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Spec.Template.Spec.ClusterName = name
 	}
 
+	// Manually convert annotations
+	for i := range v2Annotations {
+		convertAnnotations(v2Annotations[i], v3Annotations[i], dst.Annotations)
+	}
+
 	// Manually restore data.
 	restored := &v1alpha3.MachineSet{}
 	if ok, err := utilconversion.UnmarshalData(src, restored); err != nil || !ok {
@@ -190,6 +200,11 @@ func (dst *MachineSet) ConvertFrom(srcRaw conversion.Hub) error {
 	src := srcRaw.(*v1alpha3.MachineSet)
 	if err := Convert_v1alpha3_MachineSet_To_v1alpha2_MachineSet(src, dst, nil); err != nil {
 		return err
+	}
+
+	// Manually convert annotations
+	for i := range v3Annotations {
+		convertAnnotations(v3Annotations[i], v2Annotations[i], dst.Annotations)
 	}
 
 	// Preserve Hub data on down-conversion except for metadata

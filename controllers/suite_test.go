@@ -17,139 +17,156 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
-	"path/filepath"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/klog"
-	"k8s.io/klog/klogr"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"github.com/onsi/gomega/types"
+	"github.com/pkg/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
+	"sigs.k8s.io/cluster-api/controllers/remote"
+	"sigs.k8s.io/cluster-api/test/helpers"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest/printer"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
-	"sigs.k8s.io/cluster-api/controllers/external"
 	// +kubebuilder:scaffold:imports
 )
 
-// These tests use Ginkgo (BDD-style Go testing framework). Refer to
-// http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
-
-func init() {
-	klog.InitFlags(nil)
-	logf.SetLogger(klogr.New())
-
-	// Register required object kinds with global scheme.
-	_ = apiextensionsv1.AddToScheme(scheme.Scheme)
-	_ = clusterv1.AddToScheme(scheme.Scheme)
-}
-
 const (
-	timeout = time.Second * 10
+	timeout = time.Second * 30
 )
 
 var (
-	cfg               *rest.Config
-	k8sClient         client.Client
-	testEnv           *envtest.Environment
-	mgr               manager.Manager
-	clusterReconciler *ClusterReconciler
-	doneMgr           = make(chan struct{})
-	ctx               = context.Background()
+	testEnv *helpers.TestEnvironment
+	ctx     = ctrl.SetupSignalHandler()
 )
 
-func TestAPIs(t *testing.T) {
+func TestMain(m *testing.M) {
+	fmt.Println("Creating new test environment")
+	testEnv = helpers.NewTestEnvironment()
+
+	// Set up a ClusterCacheTracker and ClusterCacheReconciler to provide to controllers
+	// requiring a connection to a remote cluster
+	tracker, err := remote.NewClusterCacheTracker(
+		log.Log,
+		testEnv.Manager,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("unable to create cluster cache tracker: %v", err))
+	}
+	if err := (&remote.ClusterCacheReconciler{
+		Client:  testEnv,
+		Log:     log.Log,
+		Tracker: tracker,
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start ClusterCacheReconciler: %v", err))
+	}
+	if err := (&ClusterReconciler{
+		Client:   testEnv,
+		recorder: testEnv.GetEventRecorderFor("cluster-controller"),
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start ClusterReconciler: %v", err))
+	}
+	if err := (&MachineReconciler{
+		Client:   testEnv,
+		Tracker:  tracker,
+		recorder: testEnv.GetEventRecorderFor("machine-controller"),
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start MachineReconciler: %v", err))
+	}
+	if err := (&MachineSetReconciler{
+		Client:   testEnv,
+		Tracker:  tracker,
+		recorder: testEnv.GetEventRecorderFor("machineset-controller"),
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start MMachineSetReconciler: %v", err))
+	}
+	if err := (&MachineDeploymentReconciler{
+		Client:   testEnv,
+		recorder: testEnv.GetEventRecorderFor("machinedeployment-controller"),
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start MMachineDeploymentReconciler: %v", err))
+	}
+	if err := (&MachineHealthCheckReconciler{
+		Client:   testEnv,
+		Tracker:  tracker,
+		recorder: testEnv.GetEventRecorderFor("machinehealthcheck-controller"),
+	}).SetupWithManager(ctx, testEnv.Manager, controller.Options{MaxConcurrentReconciles: 1}); err != nil {
+		panic(fmt.Sprintf("Failed to start MachineHealthCheckReconciler : %v", err))
+	}
+
+	go func() {
+		fmt.Println("Starting the manager")
+		if err := testEnv.StartManager(ctx); err != nil {
+			panic(fmt.Sprintf("Failed to start the envtest manager: %v", err))
+		}
+	}()
+	// wait for webhook port to be open prior to running tests
+	testEnv.WaitForWebhooks()
+
+	code := m.Run()
+
+	fmt.Println("Tearing down test suite")
+	if err := testEnv.Stop(); err != nil {
+		panic(fmt.Sprintf("Failed to stop envtest: %v", err))
+	}
+
+	os.Exit(code)
+}
+
+// TestGinkgoSuite will run the ginkgo tests.
+// This will run with the testEnv setup and teardown in TestMain.
+func TestGinkgoSuite(t *testing.T) {
+	SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
+	SetDefaultEventuallyTimeout(timeout)
 	RegisterFailHandler(Fail)
 
 	RunSpecsWithDefaultAndCustomReporters(t,
-		"Controller Suite",
+		"Controllers Suite",
 		[]Reporter{printer.NewlineReporter{}})
 }
 
-var _ = BeforeSuite(func(done Done) {
-	By("bootstrapping test environment")
-	testEnv = &envtest.Environment{
-		CRDs: []runtime.Object{
-			external.TestGenericBootstrapCRD,
-			external.TestGenericBootstrapTemplateCRD,
-			external.TestGenericInfrastructureCRD,
-			external.TestGenericInfrastructureTemplateCRD,
-		},
-		CRDDirectoryPaths: []string{filepath.Join("..", "config", "crd", "bases")},
+func ContainRefOfGroupKind(group, kind string) types.GomegaMatcher {
+	return &refGroupKindMatcher{
+		kind:  kind,
+		group: group,
+	}
+}
+
+type refGroupKindMatcher struct {
+	kind  string
+	group string
+}
+
+func (matcher *refGroupKindMatcher) Match(actual interface{}) (success bool, err error) {
+	ownerRefs, ok := actual.([]metav1.OwnerReference)
+	if !ok {
+		return false, errors.Errorf("expected []metav1.OwnerReference; got %T", actual)
 	}
 
-	var err error
-	cfg, err = testEnv.Start()
-	Expect(err).ToNot(HaveOccurred())
-	Expect(cfg).ToNot(BeNil())
-
-	// +kubebuilder:scaffold:scheme
-
-	By("setting up a new manager")
-	mgr, err = manager.New(cfg, manager.Options{
-		Scheme:             scheme.Scheme,
-		MetricsBindAddress: "0",
-		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
-			syncPeriod := 1 * time.Second
-			opts.Resync = &syncPeriod
-			return cache.New(config, opts)
-		},
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	k8sClient = mgr.GetClient()
-
-	clusterReconciler = &ClusterReconciler{
-		Client:   k8sClient,
-		Log:      log.Log,
-		recorder: mgr.GetEventRecorderFor("cluster-controller"),
+	for _, ref := range ownerRefs {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil {
+			return false, nil
+		}
+		if ref.Kind == matcher.kind && gv.Group == clusterv1.GroupVersion.Group {
+			return true, nil
+		}
 	}
-	Expect(clusterReconciler.SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 1})).To(Succeed())
-	Expect((&MachineReconciler{
-		Client:   k8sClient,
-		Log:      log.Log,
-		recorder: mgr.GetEventRecorderFor("machine-controller"),
-	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 1})).To(Succeed())
-	Expect((&MachineSetReconciler{
-		Client:   k8sClient,
-		Log:      log.Log,
-		recorder: mgr.GetEventRecorderFor("machineset-controller"),
-	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 1})).To(Succeed())
-	Expect((&MachineDeploymentReconciler{
-		Client:   k8sClient,
-		Log:      log.Log,
-		recorder: mgr.GetEventRecorderFor("machinedeployment-controller"),
-	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 1})).To(Succeed())
-	Expect((&MachineHealthCheckReconciler{
-		Client:   k8sClient,
-		Log:      log.Log,
-		recorder: mgr.GetEventRecorderFor("machinehealthcheck-controller"),
-	}).SetupWithManager(mgr, controller.Options{MaxConcurrentReconciles: 1})).To(Succeed())
 
-	By("starting the manager")
-	go func() {
-		Expect(mgr.Start(doneMgr)).To(Succeed())
-	}()
+	return false, nil
+}
 
-	close(done)
-}, 60)
+func (matcher *refGroupKindMatcher) FailureMessage(actual interface{}) (message string) {
+	return fmt.Sprintf("Expected %+v to contain refs of Group %s and Kind %s", actual, matcher.group, matcher.kind)
+}
 
-var _ = AfterSuite(func() {
-	By("closing the manager")
-	close(doneMgr)
-	By("tearing down the test environment")
-	Expect(testEnv.Stop()).To(Succeed())
-})
+func (matcher *refGroupKindMatcher) NegatedFailureMessage(actual interface{}) (message string) {
+	return fmt.Sprintf("Expected %+v not to contain refs of Group %s and Kind %s", actual, matcher.group, matcher.kind)
+}
