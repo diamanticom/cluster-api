@@ -18,7 +18,6 @@ package cluster
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/scheme"
 	"sigs.k8s.io/cluster-api/cmd/version"
@@ -101,28 +99,30 @@ func (k *proxy) ValidateKubernetesVersion() error {
 	return nil
 }
 
+func (k *proxy) getRestConfig() (*rest.Config, error) {
+	config, err := k.configLoadingRules.Load()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load Kubeconfig")
+	}
+
+	configOverrides := &clientcmd.ConfigOverrides{
+		CurrentContext: k.kubeconfig.Context,
+		Timeout:        k.timeout.String(),
+	}
+	restConfig, err := clientcmd.NewDefaultClientConfig(*config, configOverrides).ClientConfig()
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "invalid configuration:") {
+			return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
+		}
+		return nil, err
+	}
+	return restConfig, nil
+}
+
 // GetConfig returns the config for a kubernetes client.
 func (k *proxy) GetConfig() (*rest.Config, error) {
-	var restConfig *restclient.Config
-	_, err := os.Stat(k.kubeconfig.Path)
-	if os.IsExist(err) {
-		config, err := k.configLoadingRules.Load()
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to load Kubeconfig")
-		}
-
-		configOverrides := &clientcmd.ConfigOverrides{
-			CurrentContext: k.kubeconfig.Context,
-			Timeout:        k.timeout.String(),
-		}
-		restConfig, err = clientcmd.NewDefaultClientConfig(*config, configOverrides).ClientConfig()
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "invalid configuration:") {
-				return nil, errors.New(strings.Replace(err.Error(), "invalid configuration:", "invalid kubeconfig file; clusterctl requires a valid kubeconfig file to connect to the management cluster:", 1))
-			}
-			return nil, err
-		}
-	} else {
+	restConfig, err := k.getRestConfig()
+	if err != nil {
 		restConfig, err = rest.InClusterConfig()
 		if err != nil {
 			return nil, fmt.Errorf("Failed inclusterConfig for kubeconfig with error: %v", err)
