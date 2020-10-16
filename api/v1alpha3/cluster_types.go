@@ -160,7 +160,8 @@ func (c *ClusterStatus) GetTypedPhase() ClusterPhase {
 		ClusterPhaseProvisioning,
 		ClusterPhaseProvisioned,
 		ClusterPhaseDeleting,
-		ClusterPhaseFailed:
+		ClusterPhaseFailed,
+		ClusterPhaseRunning:
 		return phase
 	default:
 		return ClusterPhaseUnknown

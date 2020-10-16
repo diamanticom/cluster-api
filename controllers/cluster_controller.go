@@ -25,9 +25,12 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
@@ -54,10 +57,14 @@ import (
 const (
 	// deleteRequeueAfter is how long to wait before checking again to see if the cluster still has children during
 	// deletion.
-	deleteRequeueAfter    = 5 * time.Second
-	K8SProvisioned        = "true"
-	allocResAnnotation    = "spektra.diamanti.io/allocatable-resources"
-	capacityResAnnotation = "spektra.diamanti.io/capacity-resources"
+	deleteRequeueAfter        = 5 * time.Second
+	K8SProvisioned            = "true"
+	K8SNotProvisioned         = "false"
+	KLabelExternalProvisioned = "spektra.diamanti.io/externally-provisioned"
+	KLabelClusterRunning      = "spektra.diamanti.io/cluster-running"
+	KLabelProvider            = "spektra.diamanti.io/provider"
+	allocResAnnotation        = "spektra.diamanti.io/allocatable-resources"
+	capacityResAnnotation     = "spektra.diamanti.io/capacity-resources"
 )
 
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
@@ -153,6 +160,11 @@ func (r *ClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 		}
 	}()
 
+	f := cluster.GetFinalizers()
+	if 0 == len(f) {
+		logger.Info(fmt.Sprintf("Creating cluster"))
+	}
+
 	// Add finalizer first if not exist to avoid the race condition between init and delete
 	if !controllerutil.ContainsFinalizer(cluster, clusterv1.ClusterFinalizer) {
 		controllerutil.AddFinalizer(cluster, clusterv1.ClusterFinalizer)
@@ -171,6 +183,29 @@ func (r *ClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 // reconcile handles cluster reconciliation.
 func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cluster) (ctrl.Result, error) {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	tenantDataSecret := &corev1.Secret{}
+	err := r.Client.Get(context.TODO(),
+		types.NamespacedName{Name: "tenant-data-secret", Namespace: cluster.Namespace}, tenantDataSecret)
+	if err != nil {
+		logger.Info(fmt.Sprintf("Finding tenant-data-secert error :%s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	dummyTrue := true
+	tenantName, tok := tenantDataSecret.Data["TenantName"]
+	tenantUID, uok := tenantDataSecret.Data["UID"]
+	if uok && tok {
+		expectedOwnerRef := metav1.OwnerReference{
+			APIVersion:         "tenancy.x-k8s.io/v1alpha1",
+			Kind:               "Tenant",
+			Name:               string(tenantName),
+			UID:                types.UID(string(tenantUID)),
+			BlockOwnerDeletion: &dummyTrue,
+			Controller:         &dummyTrue,
+		}
+		cluster.ObjectMeta.OwnerReferences = util.EnsureOwnerRef(cluster.ObjectMeta.OwnerReferences, expectedOwnerRef)
+
+	}
 
 	// Call the inner reconciliation methods.
 	reconciliationErrors := []error{
@@ -196,6 +231,7 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cl
 
 		errs = append(errs, err)
 	}
+
 	return res, kerrors.NewAggregate(errs)
 }
 
@@ -231,6 +267,7 @@ func (r *ClusterReconciler) reconcileMetrics(_ context.Context, cluster *cluster
 func (r *ClusterReconciler) reconcileDelete(ctx context.Context, cluster *clusterv1.Cluster) (reconcile.Result, error) {
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 
+	logger.Info("Deleting cluster")
 	descendants, err := r.listDescendants(ctx, cluster)
 	if err != nil {
 		logger.Error(err, "Failed to list descendants")
@@ -547,7 +584,7 @@ func (r *ClusterReconciler) controlPlaneMachineToCluster(o handler.MapObject) []
 // Check if the cluster is externally provisioned and we need to adopt it
 func isClusterExternallyProvisioned(cluster *clusterv1.Cluster) bool {
 	annotations := cluster.ObjectMeta.GetAnnotations()
-	if annotations != nil && annotations["spektra.diamanti.io/externally-provisioned"] == K8SProvisioned {
+	if annotations != nil && annotations[KLabelExternalProvisioned] == K8SProvisioned {
 		return true
 	}
 	return false

@@ -9,6 +9,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/docker/distribution v2.7.1+incompatible
 	github.com/drone/envsubst v1.0.3-0.20200709223903-efdb65b94e5a
+	github.com/ericchiang/k8s v1.2.0 // indirect
 	github.com/evanphx/json-patch v4.5.0+incompatible
 	github.com/go-logr/logr v0.1.0
 	github.com/gogo/protobuf v1.3.1

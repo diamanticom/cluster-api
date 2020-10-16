@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/cluster-api/cmd/version"
 	"sigs.k8s.io/cluster-api/controllers"
 	"sigs.k8s.io/cluster-api/controllers/remote"
+	cacpkv1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	addonsv1alpha3 "sigs.k8s.io/cluster-api/exp/addons/api/v1alpha3"
 	addonscontrollers "sigs.k8s.io/cluster-api/exp/addons/controllers"
 	expv1alpha3 "sigs.k8s.io/cluster-api/exp/api/v1alpha3"
@@ -79,6 +80,7 @@ func init() {
 	_ = expv1alpha3.AddToScheme(scheme)
 	_ = addonsv1alpha3.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
+	_ = cacpkv1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 

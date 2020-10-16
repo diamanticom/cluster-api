@@ -23,28 +23,31 @@ import (
 	"time"
 
 	"encoding/json"
+
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
-	"sigs.k8s.io/cluster-api/util/annotations"
-	"sigs.k8s.io/cluster-api/util/conditions"
-	utilconversion "sigs.k8s.io/cluster-api/util/conversion"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/remote"
+	cacpkv1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1alpha3"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/annotations"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	utilconversion "sigs.k8s.io/cluster-api/util/conversion"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 var (
@@ -52,8 +55,7 @@ var (
 )
 
 const (
-	// CPU, in cores. (500m = .5 cores)
-	ResourceNetwork corev1.ResourceName = "network"
+	ResourceGPU corev1.ResourceName = "nvidia.com/gpu"
 )
 
 func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) {
@@ -65,85 +67,118 @@ func setAnnotation(cluster *clusterv1.Cluster, annotation string, value string) 
 	cluster.SetAnnotations(annotations)
 }
 
-func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme) (string, string, error) {
+func GetClusterResources(cluster *clusterv1.Cluster, c client.Client, scheme *runtime.Scheme, exclude_machine_name string) (string, error) {
 	restConfig, err := remote.RESTConfig(context.TODO(), c, util.ObjectKey(cluster))
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	remoteClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
-	clusterAResourceMap := make(corev1.ResourceList)
 	clusterCResourceMap := make(corev1.ResourceList)
 	nodes, err := remoteClient.CoreV1().Nodes().List(metav1.ListOptions{})
 	for _, node := range nodes.Items {
-		AresourceList := node.Status.Allocatable
-		nodeACPUResource := AresourceList[corev1.ResourceCPU]
-		nodeAMemoryResource := AresourceList[corev1.ResourceMemory]
-		//klog.Infof("Node %s allocatable %v", node.Name, AresourceList)
-		clusterACPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
-		if !ok {
-			clusterACPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
+		if exclude_machine_name == node.Name {
+			continue
 		}
-		clusterAMemoryResource, ok := clusterAResourceMap[corev1.ResourceMemory]
-		if !ok {
-			clusterAMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
+		/* // If we need to exclude control plane nodes from cluster capacity, use this
+		var is_control_plane bool = false
+		for _, taint := range node.Spec.Taints {
+			if taint.Key == "node-role.kubernetes.io/master" {
+				is_control_plane = true
+				break
+			}
 		}
-		clusterAStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		clusterANetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
-
-		(&clusterACPUResource).SetMilli((&clusterACPUResource).MilliValue() + (&nodeACPUResource).MilliValue())
-		(&clusterAMemoryResource).Set((&clusterAMemoryResource).Value() + (&nodeAMemoryResource).Value())
-
-		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
-		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
-		clusterAResourceMap[corev1.ResourceCPU] = clusterACPUResource
-		clusterAResourceMap[corev1.ResourceMemory] = clusterAMemoryResource
-		clusterAResourceMap[corev1.ResourceStorage] = clusterAStorageResource
-		clusterAResourceMap[ResourceNetwork] = clusterANetworkResource
-
+		if is_control_plane {
+			continue
+		}*/
 		CresourceList := node.Status.Capacity
-		clusterCCPUResource, ok := clusterAResourceMap[corev1.ResourceCPU]
 		nodeCCPUResource := CresourceList[corev1.ResourceCPU]
 		nodeCMemoryResource := CresourceList[corev1.ResourceMemory]
+		nodeCGPUResource := CresourceList[ResourceGPU]
+		clusterCCPUResource, ok := clusterCResourceMap[corev1.ResourceCPU]
 		if !ok {
-			clusterCCPUResource = *resource.NewMilliQuantity(0, resource.DecimalSI)
+			clusterCCPUResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
 		clusterCMemoryResource, ok := clusterCResourceMap[corev1.ResourceMemory]
 		if !ok {
 			clusterCMemoryResource = *resource.NewQuantity(0, resource.DecimalSI)
 		}
-		clusterCStorageResource := *resource.NewQuantity(0, resource.DecimalSI)
-		clusterCNetworkResource := *resource.NewQuantity(0, resource.DecimalSI)
-
-		(&clusterCCPUResource).SetMilli((&clusterCCPUResource).MilliValue() + (&nodeCCPUResource).MilliValue())
+		clusterCGPUResource, ok := clusterCResourceMap[ResourceGPU]
+		if !ok {
+			clusterCGPUResource = *resource.NewQuantity(0, resource.DecimalSI)
+		}
+		(&clusterCCPUResource).Set((&clusterCCPUResource).Value() + (&nodeCCPUResource).Value())
+		(&clusterCGPUResource).Set((&clusterCGPUResource).Value() + (&nodeCGPUResource).Value())
 		(&clusterCMemoryResource).Set((&clusterCMemoryResource).Value() + (&nodeCMemoryResource).Value())
-
-		//klog.Infof("clusterCPUResource  %+v", clusterCPUResource)
-		//klog.Infof("clusterMemoryResource %+v", clusterMemoryResource)
 		clusterCResourceMap[corev1.ResourceCPU] = clusterCCPUResource
 		clusterCResourceMap[corev1.ResourceMemory] = clusterCMemoryResource
-		clusterCResourceMap[corev1.ResourceStorage] = clusterCStorageResource
-		clusterCResourceMap[ResourceNetwork] = clusterCNetworkResource
+		clusterCResourceMap[ResourceGPU] = clusterCGPUResource
 	}
 
-	//klog.Infof("clusterResourceMap  %+v", clusterResourceMap)
-	alloc, err := json.Marshal(clusterAResourceMap)
-	if err != nil {
-		return "", "", err
-	}
 	capacity, err := json.Marshal(clusterCResourceMap)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
-	return string(alloc), string(capacity), nil
+	return string(capacity), nil
+}
+
+// Check if the cluster control planes are in running state
+func (r *MachineReconciler) isControlPlanesRunning(cluster *clusterv1.Cluster, curMachine *clusterv1.Machine) bool {
+	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	listOptions := []client.ListOption{
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(map[string]string{clusterv1.ClusterLabelName: cluster.Name}),
+	}
+
+	var machines clusterv1.MachineList
+	isrunning := false
+	if err := r.Client.List(context.TODO(), &machines, listOptions...); err != nil {
+		logger.Error(err, "failed to list Machines for cluster %s/%s", cluster.Namespace, cluster.Name)
+		return isrunning
+	}
+
+	var provider string
+	var ok bool
+	if provider, ok = cluster.GetLabels()[KLabelProvider]; !ok {
+		logger.Info("failed to get provider label for cluster")
+		return isrunning
+	}
+	if provider == "azure" {
+		name := fmt.Sprintf("%s-control-plane", cluster.Name)
+		kcp := &cacpkv1.KubeadmControlPlane{}
+		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: cluster.Namespace}, kcp); err != nil {
+			logger.Error(err, "failed to get KCP for cluster %s/%s", cluster.Namespace, cluster.Name)
+			return isrunning
+		}
+		if kcp.Spec.Replicas != nil {
+			if *kcp.Spec.Replicas != kcp.Status.Replicas {
+				return isrunning
+			}
+		}
+	}
+	for _, machine := range machines.Items {
+		if curMachine.Name == machine.Name {
+			continue
+		}
+		// Exclude non-control-plane machines
+		if _, ok := machine.GetLabels()[clusterv1.MachineControlPlaneLabelName]; !ok {
+			continue
+		}
+		if machine.Status.Phase != "Running" {
+			return isrunning
+		}
+	}
+
+	return true
 }
 
 func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machine, c client.Client, cluster *clusterv1.Cluster) {
+	logger := r.Log.WithValues("machine", m.Name, "namespace", m.Namespace)
 	originalPhase := m.Status.Phase
 
 	// Set the phase to "pending" if nil.
@@ -151,7 +186,6 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 		m.Status.SetTypedPhase(clusterv1.MachinePhasePending)
 	}
 
-	oldPhase := m.Status.GetTypedPhase()
 	// Set the phase to "provisioning" if bootstrap is ready and the infrastructure isn't.
 	if m.Status.BootstrapReady && !m.Status.InfrastructureReady {
 		m.Status.SetTypedPhase(clusterv1.MachinePhaseProvisioning)
@@ -179,13 +213,48 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 
 	// If the phase has changed, update the LastUpdated timestamp
 	if m.Status.Phase != originalPhase {
+		updateCluster := false
+		patchHelper, err := patch.NewHelper(cluster, r.Client)
+		if err != nil {
+			logger.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
+		}
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
 		newPhase := m.Status.GetTypedPhase()
-		if util.IsControlPlaneMachine(m) && newPhase == clusterv1.MachinePhaseRunning && oldPhase != clusterv1.MachinePhaseRunning && cluster != nil {
-			setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
-			if err := c.Update(context.TODO(), cluster); err != nil {
-				r.Log.Info("failed to set annotation for cluster %q/%q", cluster.Namespace, cluster.Name)
+		if util.IsControlPlaneMachine(m) {
+			updateCluster = true
+			if newPhase == clusterv1.MachinePhaseRunning {
+				if r.isControlPlanesRunning(cluster, m) {
+					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+				}
+			} else if newPhase == clusterv1.MachinePhaseDeleted || newPhase == clusterv1.MachinePhaseDeleting {
+				if !r.isControlPlanesRunning(cluster, m) {
+					setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
+				} else {
+					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+				}
+			} else {
+				setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
+			}
+
+		}
+
+		if m.Spec.InfrastructureRef.Kind != "DiamantiMachine" && (newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting) {
+			exclude_machine_name := ""
+			if newPhase != clusterv1.MachinePhaseRunning {
+				exclude_machine_name = m.Name
+			}
+			capacity, err := GetClusterResources(cluster, r.Client, r.scheme, exclude_machine_name)
+			if err != nil {
+				logger.Error(err, "failed to get cluster resources")
+			} else {
+				setAnnotation(cluster, capacityResAnnotation, capacity)
+				updateCluster = true
+			}
+		}
+		if updateCluster && patchHelper != nil {
+			if err := patchHelper.Patch(context.TODO(), cluster); err != nil {
+				logger.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
 			}
 		}
 	}
@@ -384,7 +453,6 @@ func (r *MachineReconciler) reconcileInfrastructure(ctx context.Context, cluster
 		var x string = "diamanti"
 		m.Spec.ProviderID = pointer.StringPtr(x)
 		m.Status.InfrastructureReady = true
-		r.Log.Info("Ignoring providerID/addresses check for diamanti machine")
 		return nil
 	}
 

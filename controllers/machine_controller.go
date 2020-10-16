@@ -201,6 +201,11 @@ func (r *MachineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr e
 	}
 	m.Labels[clusterv1.ClusterLabelName] = m.Spec.ClusterName
 
+	f := m.GetFinalizers()
+	if 0 == len(f) {
+		logger.Info(fmt.Sprintf("Creating machine"))
+	}
+
 	// Add finalizer first if not exist to avoid the race condition between init and delete
 	if !controllerutil.ContainsFinalizer(m, clusterv1.MachineFinalizer) {
 		controllerutil.AddFinalizer(m, clusterv1.MachineFinalizer)
@@ -278,12 +283,13 @@ func (r *MachineReconciler) reconcileDelete(ctx context.Context, cluster *cluste
 	logger := r.Log.WithValues("machine", m.Name, "namespace", m.Namespace)
 	logger = logger.WithValues("cluster", cluster.Name)
 
+	logger.Info("Deleting machine")
 	err := r.isDeleteNodeAllowed(ctx, cluster, m)
 	isDeleteNodeAllowed := err == nil
 	if err != nil {
 		switch err {
 		case errNoControlPlaneNodes, errLastControlPlaneNode, errNilNodeRef, errClusterIsBeingDeleted:
-			logger.Info("Deleting Kubernetes Node associated with Machine is not allowed", "node", m.Status.NodeRef, "cause", err.Error())
+			logger.Error(err, "Deleting Kubernetes Node associated with Machine is not allowed", "node", m.Status.NodeRef, "cause", err.Error())
 		default:
 			return ctrl.Result{}, errors.Wrapf(err, "failed to check if Kubernetes Node deletion is allowed")
 		}

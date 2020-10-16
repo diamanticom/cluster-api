@@ -24,6 +24,7 @@ import (
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/controllers/external"
@@ -39,6 +40,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
+// Check if the cluster has atleast one control plane in running state
+func isClusterRunning(cluster *clusterv1.Cluster) bool {
+	annotations := cluster.ObjectMeta.GetAnnotations()
+	if annotations != nil && annotations[KLabelClusterRunning] == K8SProvisioned {
+		return true
+	}
+	return false
+}
+
 func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1.Cluster) {
 	if cluster.Status.Phase == "" {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhasePending)
@@ -50,6 +60,10 @@ func (r *ClusterReconciler) reconcilePhase(_ context.Context, cluster *clusterv1
 
 	if cluster.Status.InfrastructureReady && (isClusterExternallyProvisioned(cluster) || !cluster.Spec.ControlPlaneEndpoint.IsZero()) {
 		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseProvisioned)
+	}
+
+	if isClusterRunning(cluster) {
+		cluster.Status.SetTypedPhase(clusterv1.ClusterPhaseRunning)
 	}
 
 	if cluster.Status.FailureReason != nil || cluster.Status.FailureMessage != nil {
@@ -138,13 +152,13 @@ func (r *ClusterReconciler) reconcileInfrastructure(ctx context.Context, cluster
 	logger := r.Log.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 	if isClusterExternallyProvisioned(cluster) {
 		cluster.Status.InfrastructureReady = true
-		setAnnotation(cluster, "spektra.diamanti.io/cluster-running", K8SProvisioned)
-		alloc, capacity, err := GetClusterResources(cluster, r.Client, r.scheme)
+		setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+		capacity, err := GetClusterResources(cluster, r.Client, r.scheme, "")
 		if err != nil {
 			logger.V(3).Info("Failed to get cluster resources with error: %v", err)
 			return err
 		}
-		setAnnotation(cluster, allocResAnnotation, alloc)
+		//setAnnotation(cluster, allocResAnnotation, alloc)
 		setAnnotation(cluster, capacityResAnnotation, capacity)
 		return nil
 	}
@@ -269,7 +283,7 @@ func (r *ClusterReconciler) reconcileKubeconfig(ctx context.Context, cluster *cl
 		return nil
 	}
 
-	_, err := secret.Get(ctx, r.Client, util.ObjectKey(cluster), secret.Kubeconfig)
+	s, err := secret.Get(ctx, r.Client, util.ObjectKey(cluster), secret.Kubeconfig)
 	switch {
 	case apierrors.IsNotFound(err):
 		if err := kubeconfig.CreateSecret(ctx, r.Client, cluster); err != nil {
@@ -282,6 +296,25 @@ func (r *ClusterReconciler) reconcileKubeconfig(ctx context.Context, cluster *cl
 		}
 	case err != nil:
 		return errors.Wrapf(err, "failed to retrieve Kubeconfig Secret for Cluster %q in namespace %q", cluster.Name, cluster.Namespace)
+	}
+
+	// Make sure the ownerReference is set for the secret
+	if !util.HasOwnerRef(s.GetOwnerReferences(), metav1.OwnerReference{
+		APIVersion: clusterv1.GroupVersion.String(),
+		Kind:       "Cluster",
+		Name:       cluster.Name,
+		UID:        cluster.UID,
+	}) {
+		s.SetOwnerReferences(util.EnsureOwnerRef(s.GetOwnerReferences(), metav1.OwnerReference{
+			APIVersion: clusterv1.GroupVersion.String(),
+			Kind:       "Cluster",
+			Name:       cluster.Name,
+			UID:        cluster.UID,
+		}))
+		err := r.Client.Update(context.TODO(), s)
+		if err != nil {
+			return errors.Wrapf(err, "failed to update secret %s", s.Name)
+		}
 	}
 
 	return nil
