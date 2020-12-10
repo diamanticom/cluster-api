@@ -148,7 +148,7 @@ func (r *MachineReconciler) isControlPlanesRunning(cluster *clusterv1.Cluster, c
 		logger.Info("failed to get provider label for cluster")
 		return isrunning
 	}
-	if provider == "azure" {
+	if provider == "azure" || provider == "aws" {
 		name := fmt.Sprintf("%s-control-plane", cluster.Name)
 		kcp := &cacpkv1.KubeadmControlPlane{}
 		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: cluster.Namespace}, kcp); err != nil {
@@ -213,49 +213,50 @@ func (r *MachineReconciler) reconcilePhase(_ context.Context, m *clusterv1.Machi
 
 	// If the phase has changed, update the LastUpdated timestamp
 	if m.Status.Phase != originalPhase {
-		updateCluster := false
-		patchHelper, err := patch.NewHelper(cluster, r.Client)
-		if err != nil {
-			logger.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
-		}
 		now := metav1.Now()
 		m.Status.LastUpdated = &now
-		newPhase := m.Status.GetTypedPhase()
-		if util.IsControlPlaneMachine(m) {
-			updateCluster = true
-			if newPhase == clusterv1.MachinePhaseRunning {
-				if r.isControlPlanesRunning(cluster, m) {
-					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
-				}
-			} else if newPhase == clusterv1.MachinePhaseDeleted || newPhase == clusterv1.MachinePhaseDeleting {
-				if !r.isControlPlanesRunning(cluster, m) {
-					setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
-				} else {
-					setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
-				}
-			} else {
+	}
+
+	updateCluster := false
+	patchHelper, err := patch.NewHelper(cluster, r.Client)
+	if err != nil {
+		logger.Error(err, "failed to create patch helper for cluster %s", cluster.Name)
+	}
+	newPhase := m.Status.GetTypedPhase()
+	if util.IsControlPlaneMachine(m) {
+		updateCluster = true
+		if newPhase == clusterv1.MachinePhaseRunning {
+			if r.isControlPlanesRunning(cluster, m) {
+				setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
+			}
+		} else if newPhase == clusterv1.MachinePhaseDeleted || newPhase == clusterv1.MachinePhaseDeleting {
+			if !r.isControlPlanesRunning(cluster, m) {
 				setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
-			}
-
-		}
-
-		if m.Spec.InfrastructureRef.Kind != "DiamantiMachine" && (newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting) {
-			exclude_machine_name := ""
-			if newPhase != clusterv1.MachinePhaseRunning {
-				exclude_machine_name = m.Name
-			}
-			capacity, err := GetClusterResources(cluster, r.Client, r.scheme, exclude_machine_name)
-			if err != nil {
-				logger.Error(err, "failed to get cluster resources")
 			} else {
-				setAnnotation(cluster, capacityResAnnotation, capacity)
-				updateCluster = true
+				setAnnotation(cluster, KLabelClusterRunning, K8SProvisioned)
 			}
+		} else {
+			setAnnotation(cluster, KLabelClusterRunning, K8SNotProvisioned)
 		}
-		if updateCluster && patchHelper != nil {
-			if err := patchHelper.Patch(context.TODO(), cluster); err != nil {
-				logger.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
-			}
+
+	}
+
+	if m.Spec.InfrastructureRef.Kind != "DiamantiMachine" && (newPhase == clusterv1.MachinePhaseRunning || newPhase == clusterv1.MachinePhaseFailed || newPhase == clusterv1.MachinePhaseDeleting) {
+		exclude_machine_name := ""
+		if newPhase != clusterv1.MachinePhaseRunning {
+			exclude_machine_name = m.Name
+		}
+		capacity, err := GetClusterResources(cluster, r.Client, r.scheme, exclude_machine_name)
+		if err != nil {
+			logger.Error(err, "failed to get cluster resources")
+		} else {
+			setAnnotation(cluster, capacityResAnnotation, capacity)
+			updateCluster = true
+		}
+	}
+	if updateCluster && patchHelper != nil {
+		if err := patchHelper.Patch(context.TODO(), cluster); err != nil {
+			logger.Error(err, fmt.Sprintf("failed to set annotation for cluster %q/%q err %v", cluster.Namespace, cluster.Name, err))
 		}
 	}
 }
