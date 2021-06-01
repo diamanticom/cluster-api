@@ -285,7 +285,7 @@ func getMoveSequence(graph *objectGraph) *moveSequence {
 			// otherwise skip it (the node will be re-processed in the next group).
 			ownersInPlace := true
 			for owner := range n.owners {
-				if !moveSequence.hasNode(owner) {
+				if !moveSequence.hasNode(owner) && owner.identity.Kind != "Tenant" {
 					ownersInPlace = false
 					break
 				}
@@ -499,6 +499,10 @@ func (o *objectMover) createTargetObject(nodeToCreate *node, toProxy Proxy) erro
 	if len(nodeToCreate.owners) > 0 {
 		ownerRefs := []metav1.OwnerReference{}
 		for ownerNode := range nodeToCreate.owners {
+			if ownerNode.identity.Kind == "Tenant" {
+				// Skip owner reference to Tenant object
+				continue
+			}
 			ownerRef := metav1.OwnerReference{
 				APIVersion: ownerNode.identity.APIVersion,
 				Kind:       ownerNode.identity.Kind,
